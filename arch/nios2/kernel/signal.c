@@ -15,7 +15,7 @@
 #include <linux/uaccess.h>
 #include <linux/unistd.h>
 #include <linux/personality.h>
-#include <linux/tracehook.h>
+#include <linux/resume_user_mode.h>
 
 #include <asm/ucontext.h>
 #include <asm/cacheflush.h>
@@ -36,63 +36,63 @@ struct rt_sigframe {
 
 static inline int rt_restore_ucontext(struct pt_regs *regs,
 					struct switch_stack *sw,
-					struct ucontext *uc, int *pr2)
+					struct ucontext __user *uc, int *pr2)
 {
 	int temp;
-	unsigned long *gregs = uc->uc_mcontext.gregs;
-	int err;
 
 	/* Always make any pending restarted system calls return -EINTR */
 	current->restart_block.fn = do_no_restart_syscall;
 
-	err = __get_user(temp, &uc->uc_mcontext.version);
-	if (temp != MCONTEXT_VERSION)
-		goto badframe;
-	/* restore passed registers */
-	err |= __get_user(regs->r1, &gregs[0]);
-	err |= __get_user(regs->r2, &gregs[1]);
-	err |= __get_user(regs->r3, &gregs[2]);
-	err |= __get_user(regs->r4, &gregs[3]);
-	err |= __get_user(regs->r5, &gregs[4]);
-	err |= __get_user(regs->r6, &gregs[5]);
-	err |= __get_user(regs->r7, &gregs[6]);
-	err |= __get_user(regs->r8, &gregs[7]);
-	err |= __get_user(regs->r9, &gregs[8]);
-	err |= __get_user(regs->r10, &gregs[9]);
-	err |= __get_user(regs->r11, &gregs[10]);
-	err |= __get_user(regs->r12, &gregs[11]);
-	err |= __get_user(regs->r13, &gregs[12]);
-	err |= __get_user(regs->r14, &gregs[13]);
-	err |= __get_user(regs->r15, &gregs[14]);
-	err |= __get_user(sw->r16, &gregs[15]);
-	err |= __get_user(sw->r17, &gregs[16]);
-	err |= __get_user(sw->r18, &gregs[17]);
-	err |= __get_user(sw->r19, &gregs[18]);
-	err |= __get_user(sw->r20, &gregs[19]);
-	err |= __get_user(sw->r21, &gregs[20]);
-	err |= __get_user(sw->r22, &gregs[21]);
-	err |= __get_user(sw->r23, &gregs[22]);
-	/* gregs[23] is handled below */
-	err |= __get_user(sw->fp, &gregs[24]);  /* Verify, should this be
-							settable */
-	err |= __get_user(sw->gp, &gregs[25]);  /* Verify, should this be
-							settable */
+	scoped_user_read_access(uc, badframe) {
+		unsigned long __user *gregs = uc->uc_mcontext.gregs;
 
-	err |= __get_user(temp, &gregs[26]);  /* Not really necessary no user
-							settable bits */
-	err |= __get_user(regs->ea, &gregs[27]);
+		unsafe_get_user(temp, &uc->uc_mcontext.version, badframe);
+		if (temp != MCONTEXT_VERSION)
+			goto badframe;
+		/* restore passed registers */
+		unsafe_get_user(regs->r1, &gregs[0], badframe);
+		unsafe_get_user(regs->r2, &gregs[1], badframe);
+		unsafe_get_user(regs->r3, &gregs[2], badframe);
+		unsafe_get_user(regs->r4, &gregs[3], badframe);
+		unsafe_get_user(regs->r5, &gregs[4], badframe);
+		unsafe_get_user(regs->r6, &gregs[5], badframe);
+		unsafe_get_user(regs->r7, &gregs[6], badframe);
+		unsafe_get_user(regs->r8, &gregs[7], badframe);
+		unsafe_get_user(regs->r9, &gregs[8], badframe);
+		unsafe_get_user(regs->r10, &gregs[9], badframe);
+		unsafe_get_user(regs->r11, &gregs[10], badframe);
+		unsafe_get_user(regs->r12, &gregs[11], badframe);
+		unsafe_get_user(regs->r13, &gregs[12], badframe);
+		unsafe_get_user(regs->r14, &gregs[13], badframe);
+		unsafe_get_user(regs->r15, &gregs[14], badframe);
+		unsafe_get_user(sw->r16, &gregs[15], badframe);
+		unsafe_get_user(sw->r17, &gregs[16], badframe);
+		unsafe_get_user(sw->r18, &gregs[17], badframe);
+		unsafe_get_user(sw->r19, &gregs[18], badframe);
+		unsafe_get_user(sw->r20, &gregs[19], badframe);
+		unsafe_get_user(sw->r21, &gregs[20], badframe);
+		unsafe_get_user(sw->r22, &gregs[21], badframe);
+		unsafe_get_user(sw->r23, &gregs[22], badframe);
+		/* gregs[23] is handled below */
+		/* Verify, should these be settable */
+		unsafe_get_user(sw->fp, &gregs[24], badframe);
+		unsafe_get_user(sw->gp, &gregs[25], badframe);
 
-	err |= __get_user(regs->ra, &gregs[23]);
-	err |= __get_user(regs->sp, &gregs[28]);
+		/* Not really necessary no user settable bits */
+		unsafe_get_user(temp, &gregs[26], badframe);
+		unsafe_get_user(regs->ea, &gregs[27], badframe);
+
+		unsafe_get_user(regs->ra, &gregs[23], badframe);
+		unsafe_get_user(regs->sp, &gregs[28], badframe);
+	}
 
 	regs->orig_r2 = -1;		/* disable syscall checks */
 
-	err |= restore_altstack(&uc->uc_stack);
-	if (err)
+	if (restore_altstack(&uc->uc_stack))
 		goto badframe;
 
 	*pr2 = regs->r2;
-	return err;
+	return 0;
 
 badframe:
 	return 1;
@@ -102,11 +102,12 @@ asmlinkage int do_rt_sigreturn(struct switch_stack *sw)
 {
 	struct pt_regs *regs = (struct pt_regs *)(sw + 1);
 	/* Verify, can we follow the stack back */
-	struct rt_sigframe *frame = (struct rt_sigframe *) regs->sp;
+	struct rt_sigframe __user *frame;
 	sigset_t set;
 	int rval;
 
-	if (!access_ok(VERIFY_READ, frame, sizeof(*frame)))
+	frame = (struct rt_sigframe __user *) regs->sp;
+	if (!access_ok(frame, sizeof(*frame)))
 		goto badframe;
 
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
@@ -120,50 +121,56 @@ asmlinkage int do_rt_sigreturn(struct switch_stack *sw)
 	return rval;
 
 badframe:
-	force_sig(SIGSEGV, current);
+	force_sig(SIGSEGV);
 	return 0;
 }
 
-static inline int rt_setup_ucontext(struct ucontext *uc, struct pt_regs *regs)
+static inline int rt_setup_ucontext(struct ucontext __user *uc, struct pt_regs *regs)
 {
 	struct switch_stack *sw = (struct switch_stack *)regs - 1;
-	unsigned long *gregs = uc->uc_mcontext.gregs;
-	int err = 0;
 
-	err |= __put_user(MCONTEXT_VERSION, &uc->uc_mcontext.version);
-	err |= __put_user(regs->r1, &gregs[0]);
-	err |= __put_user(regs->r2, &gregs[1]);
-	err |= __put_user(regs->r3, &gregs[2]);
-	err |= __put_user(regs->r4, &gregs[3]);
-	err |= __put_user(regs->r5, &gregs[4]);
-	err |= __put_user(regs->r6, &gregs[5]);
-	err |= __put_user(regs->r7, &gregs[6]);
-	err |= __put_user(regs->r8, &gregs[7]);
-	err |= __put_user(regs->r9, &gregs[8]);
-	err |= __put_user(regs->r10, &gregs[9]);
-	err |= __put_user(regs->r11, &gregs[10]);
-	err |= __put_user(regs->r12, &gregs[11]);
-	err |= __put_user(regs->r13, &gregs[12]);
-	err |= __put_user(regs->r14, &gregs[13]);
-	err |= __put_user(regs->r15, &gregs[14]);
-	err |= __put_user(sw->r16, &gregs[15]);
-	err |= __put_user(sw->r17, &gregs[16]);
-	err |= __put_user(sw->r18, &gregs[17]);
-	err |= __put_user(sw->r19, &gregs[18]);
-	err |= __put_user(sw->r20, &gregs[19]);
-	err |= __put_user(sw->r21, &gregs[20]);
-	err |= __put_user(sw->r22, &gregs[21]);
-	err |= __put_user(sw->r23, &gregs[22]);
-	err |= __put_user(regs->ra, &gregs[23]);
-	err |= __put_user(sw->fp, &gregs[24]);
-	err |= __put_user(sw->gp, &gregs[25]);
-	err |= __put_user(regs->ea, &gregs[27]);
-	err |= __put_user(regs->sp, &gregs[28]);
-	return err;
+	scoped_user_write_access(uc, Efault) {
+		unsigned long __user *gregs = uc->uc_mcontext.gregs;
+
+		unsafe_put_user(MCONTEXT_VERSION, &uc->uc_mcontext.version, Efault);
+		unsafe_put_user(regs->r1, &gregs[0], Efault);
+		unsafe_put_user(regs->r2, &gregs[1], Efault);
+		unsafe_put_user(regs->r3, &gregs[2], Efault);
+		unsafe_put_user(regs->r4, &gregs[3], Efault);
+		unsafe_put_user(regs->r5, &gregs[4], Efault);
+		unsafe_put_user(regs->r6, &gregs[5], Efault);
+		unsafe_put_user(regs->r7, &gregs[6], Efault);
+		unsafe_put_user(regs->r8, &gregs[7], Efault);
+		unsafe_put_user(regs->r9, &gregs[8], Efault);
+		unsafe_put_user(regs->r10, &gregs[9], Efault);
+		unsafe_put_user(regs->r11, &gregs[10], Efault);
+		unsafe_put_user(regs->r12, &gregs[11], Efault);
+		unsafe_put_user(regs->r13, &gregs[12], Efault);
+		unsafe_put_user(regs->r14, &gregs[13], Efault);
+		unsafe_put_user(regs->r15, &gregs[14], Efault);
+		unsafe_put_user(sw->r16, &gregs[15], Efault);
+		unsafe_put_user(sw->r17, &gregs[16], Efault);
+		unsafe_put_user(sw->r18, &gregs[17], Efault);
+		unsafe_put_user(sw->r19, &gregs[18], Efault);
+		unsafe_put_user(sw->r20, &gregs[19], Efault);
+		unsafe_put_user(sw->r21, &gregs[20], Efault);
+		unsafe_put_user(sw->r22, &gregs[21], Efault);
+		unsafe_put_user(sw->r23, &gregs[22], Efault);
+		unsafe_put_user(regs->ra, &gregs[23], Efault);
+		unsafe_put_user(sw->fp, &gregs[24], Efault);
+		unsafe_put_user(sw->gp, &gregs[25], Efault);
+		unsafe_put_user(regs->ea, &gregs[27], Efault);
+		unsafe_put_user(regs->sp, &gregs[28], Efault);
+	}
+	return 0;
+
+Efault:
+	return -EFAULT;
 }
 
-static inline void *get_sigframe(struct ksignal *ksig, struct pt_regs *regs,
-				 size_t frame_size)
+static inline void __user *get_sigframe(struct ksignal *ksig,
+					struct pt_regs *regs,
+					size_t frame_size)
 {
 	unsigned long usp;
 
@@ -174,23 +181,27 @@ static inline void *get_sigframe(struct ksignal *ksig, struct pt_regs *regs,
 	usp = sigsp(usp, ksig);
 
 	/* Verify, is it 32 or 64 bit aligned */
-	return (void *)((usp - frame_size) & -8UL);
+	return (void __user *)((usp - frame_size) & -8UL);
 }
 
 static int setup_rt_frame(struct ksignal *ksig, sigset_t *set,
 			  struct pt_regs *regs)
 {
-	struct rt_sigframe *frame;
+	struct rt_sigframe __user *frame;
 	int err = 0;
 
 	frame = get_sigframe(ksig, regs, sizeof(*frame));
+	if (!access_ok(frame, sizeof(*frame)))
+		goto give_sigsegv;
 
 	if (ksig->ka.sa.sa_flags & SA_SIGINFO)
 		err |= copy_siginfo_to_user(&frame->info, &ksig->info);
 
 	/* Create the ucontext.  */
-	err |= __put_user(0, &frame->uc.uc_flags);
-	err |= __put_user(0, &frame->uc.uc_link);
+	scoped_user_write_access(frame, give_sigsegv) {
+		unsafe_put_user(0, &frame->uc.uc_flags, give_sigsegv);
+		unsafe_put_user(0, &frame->uc.uc_link, give_sigsegv);
+	}
 	err |= __save_altstack(&frame->uc.uc_stack, regs->sp);
 	err |= rt_setup_ucontext(&frame->uc, regs);
 	err |= copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
@@ -211,7 +222,7 @@ static int setup_rt_frame(struct ksignal *ksig, sigset_t *set,
 	return 0;
 
 give_sigsegv:
-	force_sigsegv(ksig->sig, current);
+	force_sigsegv(ksig->sig);
 	return -EFAULT;
 }
 
@@ -240,7 +251,7 @@ static int do_signal(struct pt_regs *regs)
 	/*
 	 * If we were from a system call, check for system call restarting...
 	 */
-	if (regs->orig_r2 >= 0) {
+	if (regs->orig_r2 >= 0 && regs->r1) {
 		continue_addr = regs->ea;
 		restart_addr = continue_addr - 4;
 		retval = regs->r2;
@@ -252,6 +263,7 @@ static int do_signal(struct pt_regs *regs)
 		switch (retval) {
 		case ERESTART_RESTARTBLOCK:
 			restart = -2;
+			fallthrough;
 		case ERESTARTNOHAND:
 		case ERESTARTSYS:
 		case ERESTARTNOINTR:
@@ -261,6 +273,7 @@ static int do_signal(struct pt_regs *regs)
 			regs->ea = restart_addr;
 			break;
 		}
+		regs->orig_r2 = -1;
 	}
 
 	if (get_signal(&ksig)) {
@@ -305,7 +318,8 @@ asmlinkage int do_notify_resume(struct pt_regs *regs)
 	if (!user_mode(regs))
 		return 0;
 
-	if (test_thread_flag(TIF_SIGPENDING)) {
+	if (test_thread_flag(TIF_SIGPENDING) ||
+	    test_thread_flag(TIF_NOTIFY_SIGNAL)) {
 		int restart = do_signal(regs);
 
 		if (unlikely(restart)) {
@@ -316,8 +330,8 @@ asmlinkage int do_notify_resume(struct pt_regs *regs)
 			 */
 			return restart;
 		}
-	} else if (test_and_clear_thread_flag(TIF_NOTIFY_RESUME))
-		tracehook_notify_resume(regs);
+	} else if (test_thread_flag(TIF_NOTIFY_RESUME))
+		resume_user_mode_work(regs);
 
 	return 0;
 }

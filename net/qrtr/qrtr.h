@@ -27,6 +27,12 @@ int qrtr_endpoint_register(struct qrtr_endpoint *ep, unsigned int nid);
 
 void qrtr_endpoint_unregister(struct qrtr_endpoint *ep);
 
+void qrtr_endpoint_hello(struct qrtr_endpoint *ep);
+
 int qrtr_endpoint_post(struct qrtr_endpoint *ep, const void *data, size_t len);
+
+int qrtr_ns_init(void);
+
+void qrtr_ns_remove(void);
 
 #endif

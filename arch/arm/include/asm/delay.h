@@ -7,7 +7,7 @@
 #ifndef __ASM_ARM_DELAY_H
 #define __ASM_ARM_DELAY_H
 
-#include <asm/memory.h>
+#include <asm/page.h>
 #include <asm/param.h>	/* HZ */
 
 /*
@@ -91,7 +91,6 @@ extern void __loop_udelay(unsigned long usecs);
 extern void __loop_const_udelay(unsigned long);
 
 /* Delay-loop timer registration. */
-#define ARCH_HAS_READ_CURRENT_TIMER
 extern void register_current_timer_delay(const struct delay_timer *timer);
 
 #endif /* __ASSEMBLY__ */

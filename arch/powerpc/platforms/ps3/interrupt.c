@@ -1,26 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  PS3 interrupt routines.
  *
  *  Copyright (C) 2006 Sony Computer Entertainment Inc.
  *  Copyright 2006 Sony Corp.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
 #include <linux/export.h>
 #include <linux/irq.h>
+#include <linux/irqdomain.h>
 
 #include <asm/machdep.h>
 #include <asm/udbg.h>
@@ -57,7 +46,7 @@
  * implementation equates HV plug value to Linux virq value, constrains each
  * interrupt to have a system wide unique plug number, and limits the range
  * of the plug values to map into the first dword of the bitmaps.  This
- * gives a usable range of plug values of  {NUM_ISA_INTERRUPTS..63}.  Note
+ * gives a usable range of plug values of  {NR_IRQS_LEGACY..63}.  Note
  * that there is no constraint on how many in this set an individual thread
  * can acquire.
  *
@@ -195,8 +184,7 @@ static int ps3_virq_setup(enum ps3_cpu_binding cpu, unsigned long outlet,
 	if (!*virq) {
 		FAIL("%s:%d: irq_create_mapping failed: outlet %lu\n",
 			__func__, __LINE__, outlet);
-		result = -ENOMEM;
-		goto fail_create;
+		return -ENOMEM;
 	}
 
 	DBG("%s:%d: outlet %lu => cpu %u, virq %u\n", __func__, __LINE__,
@@ -207,16 +195,12 @@ static int ps3_virq_setup(enum ps3_cpu_binding cpu, unsigned long outlet,
 	if (result) {
 		FAIL("%s:%d: irq_set_chip_data failed\n",
 			__func__, __LINE__);
-		goto fail_set;
+		irq_dispose_mapping(*virq);
+		return result;
 	}
 
 	ps3_chip_mask(irq_get_irq_data(*virq));
 
-	return result;
-
-fail_set:
-	irq_dispose_mapping(*virq);
-fail_create:
 	return result;
 }
 
@@ -261,7 +245,7 @@ int ps3_irq_plug_setup(enum ps3_cpu_binding cpu, unsigned long outlet,
 
 	if (result) {
 		FAIL("%s:%d: ps3_virq_setup failed\n", __func__, __LINE__);
-		goto fail_setup;
+		return result;
 	}
 
 	pd = irq_get_chip_data(*virq);
@@ -274,15 +258,10 @@ int ps3_irq_plug_setup(enum ps3_cpu_binding cpu, unsigned long outlet,
 	if (result) {
 		FAIL("%s:%d: lv1_connect_irq_plug_ext failed: %s\n",
 		__func__, __LINE__, ps3_result(result));
-		result = -EPERM;
-		goto fail_connect;
+		ps3_virq_destroy(*virq);
+		return -EPERM;
 	}
 
-	return result;
-
-fail_connect:
-	ps3_virq_destroy(*virq);
-fail_setup:
 	return result;
 }
 EXPORT_SYMBOL_GPL(ps3_irq_plug_setup);
@@ -389,9 +368,9 @@ int ps3_send_event_locally(unsigned int virq)
 
 /**
  * ps3_sb_event_receive_port_setup - Setup a system bus event receive port.
+ * @dev: The system bus device instance.
  * @cpu: enum ps3_cpu_binding indicating the cpu the interrupt should be
  * serviced on.
- * @dev: The system bus device instance.
  * @virq: The assigned Linux virq.
  *
  * An event irq represents a virtual device interrupt.  The interrupt_id
@@ -733,7 +712,7 @@ static unsigned int ps3_get_irq(void)
 	}
 
 #if defined(DEBUG)
-	if (unlikely(plug < NUM_ISA_INTERRUPTS || plug > PS3_PLUG_MAX)) {
+	if (unlikely(plug < NR_IRQS_LEGACY || plug > PS3_PLUG_MAX)) {
 		dump_bmp(&per_cpu(ps3_private, 0));
 		dump_bmp(&per_cpu(ps3_private, 1));
 		BUG();
@@ -754,8 +733,8 @@ void __init ps3_init_IRQ(void)
 	unsigned cpu;
 	struct irq_domain *host;
 
-	host = irq_domain_add_nomap(NULL, PS3_PLUG_MAX + 1, &ps3_host_ops, NULL);
-	irq_set_default_host(host);
+	host = irq_domain_create_nomap(NULL, PS3_PLUG_MAX + 1, &ps3_host_ops, NULL);
+	irq_set_default_domain(host);
 
 	for_each_possible_cpu(cpu) {
 		struct ps3_private *pd = &per_cpu(ps3_private, cpu);

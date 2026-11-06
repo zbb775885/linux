@@ -25,64 +25,61 @@
  *
  */
 
+#include <linux/export.h>
 #include <linux/module.h>
-#include <drm/drmP.h>
+#include <linux/moduleparam.h>
 
 #include "drm_crtc_helper_internal.h"
+#include "drm_panic_internal.h"
 
-MODULE_AUTHOR("David Airlie, Jesse Barnes");
-MODULE_DESCRIPTION("DRM KMS helper");
-MODULE_LICENSE("GPL and additional rights");
+#if IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
+bool drm_fbdev_emulation = true;
+EXPORT_SYMBOL(drm_fbdev_emulation);
+module_param_named(fbdev_emulation, drm_fbdev_emulation, bool, 0600);
+MODULE_PARM_DESC(fbdev_emulation, "Enable legacy fbdev emulation [default=true]");
 
-#if IS_ENABLED(CONFIG_DRM_LOAD_EDID_FIRMWARE)
+int drm_fbdev_overalloc = CONFIG_DRM_FBDEV_OVERALLOC;
+EXPORT_SYMBOL(drm_fbdev_overalloc);
+module_param(drm_fbdev_overalloc, int, 0444);
+MODULE_PARM_DESC(drm_fbdev_overalloc,
+		 "Overallocation of the fbdev buffer (%) [default="
+		 __stringify(CONFIG_DRM_FBDEV_OVERALLOC) "]");
 
-/* Backward compatibility for drm_kms_helper.edid_firmware */
-static int edid_firmware_set(const char *val, const struct kernel_param *kp)
-{
-	DRM_NOTE("drm_kms_firmware.edid_firmware is deprecated, please use drm.edid_firmware intead.\n");
-
-	return __drm_set_edid_firmware_path(val);
-}
-
-static int edid_firmware_get(char *buffer, const struct kernel_param *kp)
-{
-	return __drm_get_edid_firmware_path(buffer, PAGE_SIZE);
-}
-
-static const struct kernel_param_ops edid_firmware_ops = {
-	.set = edid_firmware_set,
-	.get = edid_firmware_get,
-};
-
-module_param_cb(edid_firmware, &edid_firmware_ops, NULL, 0644);
-__MODULE_PARM_TYPE(edid_firmware, "charp");
-MODULE_PARM_DESC(edid_firmware,
-		 "DEPRECATED. Use drm.edid_firmware module parameter instead.");
+/*
+ * In order to keep user-space compatibility, we want in certain use-cases
+ * to keep leaking the fbdev physical address to the user-space program
+ * handling the fbdev buffer.
+ *
+ * This is a bad habit, essentially kept to support closed-source OpenGL
+ * drivers that should really be moved into open-source upstream projects
+ * instead of using legacy physical addresses in user space to communicate
+ * with other out-of-tree kernel modules.
+ *
+ * This module_param *should* be removed as soon as possible and be
+ * considered as a broken and legacy behaviour from a modern fbdev device.
+ */
+bool drm_leak_fbdev_smem;
+EXPORT_SYMBOL(drm_leak_fbdev_smem);
+#if IS_ENABLED(CONFIG_DRM_FBDEV_LEAK_PHYS_SMEM)
+module_param_unsafe(drm_leak_fbdev_smem, bool, 0600);
+MODULE_PARM_DESC(drm_leak_fbdev_smem,
+		 "Allow unsafe leaking fbdev physical smem address [default=false]");
+#endif
 
 #endif
 
 static int __init drm_kms_helper_init(void)
 {
-	int ret;
-
-	/* Call init functions from specific kms helpers here */
-	ret = drm_fb_helper_modinit();
-	if (ret < 0)
-		goto out;
-
-	ret = drm_dp_aux_dev_init();
-	if (ret < 0)
-		goto out;
-
-out:
-	return ret;
+	return drm_panic_helper_init();
 }
+module_init(drm_kms_helper_init);
 
 static void __exit drm_kms_helper_exit(void)
 {
-	/* Call exit functions from specific kms helpers here */
-	drm_dp_aux_dev_exit();
+	drm_panic_helper_exit();
 }
-
-module_init(drm_kms_helper_init);
 module_exit(drm_kms_helper_exit);
+
+MODULE_AUTHOR("David Airlie, Jesse Barnes");
+MODULE_DESCRIPTION("DRM KMS helper");
+MODULE_LICENSE("GPL and additional rights");

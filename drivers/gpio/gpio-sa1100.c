@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-sa1100/gpio.c
  *
  * Generic SA-1100 GPIO handling
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/io.h>
@@ -15,6 +12,12 @@
 #include <soc/sa1100/pwer.h>
 #include <mach/hardware.h>
 #include <mach/irqs.h>
+#include <mach/generic.h>
+#include <linux/property.h>
+
+const struct software_node sa1100_gpiochip_node = {
+	.name = "sa1100-gpio",
+};
 
 struct sa1100_gpio_chip {
 	struct gpio_chip chip;
@@ -45,18 +48,24 @@ static int sa1100_gpio_get(struct gpio_chip *chip, unsigned offset)
 		BIT(offset);
 }
 
-static void sa1100_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int sa1100_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			   int value)
 {
 	int reg = value ? R_GPSR : R_GPCR;
 
 	writel_relaxed(BIT(offset), sa1100_gpio_chip(chip)->membase + reg);
+
+	return 0;
 }
 
 static int sa1100_get_direction(struct gpio_chip *chip, unsigned offset)
 {
 	void __iomem *gpdr = sa1100_gpio_chip(chip)->membase + R_GPDR;
 
-	return !(readl_relaxed(gpdr) & BIT(offset));
+	if (readl_relaxed(gpdr) & BIT(offset))
+		return GPIO_LINE_DIRECTION_OUT;
+
+	return GPIO_LINE_DIRECTION_IN;
 }
 
 static int sa1100_direction_input(struct gpio_chip *chip, unsigned offset)
@@ -130,7 +139,7 @@ static int sa1100_gpio_type(struct irq_data *d, unsigned int type)
 	if (type == IRQ_TYPE_PROBE) {
 		if ((sgc->irqrising | sgc->irqfalling) & mask)
 			return 0;
-		type = IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING;
+		type = IRQ_TYPE_EDGE_BOTH;
 	}
 
 	if (type & IRQ_TYPE_EDGE_RISING)
@@ -252,7 +261,7 @@ static void sa1100_gpio_handler(struct irq_desc *desc)
 	} while (mask);
 }
 
-static int sa1100_gpio_suspend(void)
+static int sa1100_gpio_suspend(void *data)
 {
 	struct sa1100_gpio_chip *sgc = &sa1100_gpio_chip;
 
@@ -271,19 +280,23 @@ static int sa1100_gpio_suspend(void)
 	return 0;
 }
 
-static void sa1100_gpio_resume(void)
+static void sa1100_gpio_resume(void *data)
 {
 	sa1100_update_edge_regs(&sa1100_gpio_chip);
 }
 
-static struct syscore_ops sa1100_gpio_syscore_ops = {
+static const struct syscore_ops sa1100_gpio_syscore_ops = {
 	.suspend	= sa1100_gpio_suspend,
 	.resume		= sa1100_gpio_resume,
 };
 
+static struct syscore sa1100_gpio_syscore = {
+	.ops = &sa1100_gpio_syscore_ops,
+};
+
 static int __init sa1100_gpio_init_devicefs(void)
 {
-	register_syscore_ops(&sa1100_gpio_syscore_ops);
+	register_syscore(&sa1100_gpio_syscore);
 	return 0;
 }
 
@@ -309,6 +322,7 @@ static const int sa1100_gpio_irqs[] __initconst = {
 void __init sa1100_init_gpio(void)
 {
 	struct sa1100_gpio_chip *sgc = &sa1100_gpio_chip;
+	struct gpio_chip *gc = &sgc->chip;
 	int i;
 
 	/* clear all GPIO edge detects */
@@ -316,9 +330,11 @@ void __init sa1100_init_gpio(void)
 	writel_relaxed(0, sgc->membase + R_GRER);
 	writel_relaxed(-1, sgc->membase + R_GEDR);
 
-	gpiochip_add_data(&sa1100_gpio_chip.chip, NULL);
+	software_node_register(&sa1100_gpiochip_node);
+	gc->fwnode = software_node_fwnode(&sa1100_gpiochip_node);
+	gpiochip_add_data(gc, NULL);
 
-	sa1100_gpio_irqdomain = irq_domain_add_simple(NULL,
+	sa1100_gpio_irqdomain = irq_domain_create_simple(NULL,
 			28, IRQ_GPIO0,
 			&sa1100_gpio_irqdomain_ops, sgc);
 

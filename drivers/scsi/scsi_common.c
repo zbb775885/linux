@@ -7,8 +7,19 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <asm/unaligned.h>
+#include <linux/module.h>
+#include <uapi/linux/pr.h>
+#include <linux/unaligned.h>
 #include <scsi/scsi_common.h>
+
+MODULE_DESCRIPTION("SCSI functions used by both the initiator and the target code");
+MODULE_LICENSE("GPL v2");
+
+/* Command group 3 is reserved and should never be used.  */
+const unsigned char scsi_command_size_tbl[8] = {
+	6, 10, 10, 12, 16, 12, 10, 10
+};
+EXPORT_SYMBOL(scsi_command_size_tbl);
 
 /* NB: These are exposed through /proc/scsi/scsi and form part of the ABI.
  * You may not alter any existing entry (although adding new ones is
@@ -53,6 +64,48 @@ const char *scsi_device_type(unsigned type)
 	return scsi_device_types[type];
 }
 EXPORT_SYMBOL(scsi_device_type);
+
+enum pr_type scsi_pr_type_to_block(enum scsi_pr_type type)
+{
+	switch (type) {
+	case SCSI_PR_WRITE_EXCLUSIVE:
+		return PR_WRITE_EXCLUSIVE;
+	case SCSI_PR_EXCLUSIVE_ACCESS:
+		return PR_EXCLUSIVE_ACCESS;
+	case SCSI_PR_WRITE_EXCLUSIVE_REG_ONLY:
+		return PR_WRITE_EXCLUSIVE_REG_ONLY;
+	case SCSI_PR_EXCLUSIVE_ACCESS_REG_ONLY:
+		return PR_EXCLUSIVE_ACCESS_REG_ONLY;
+	case SCSI_PR_WRITE_EXCLUSIVE_ALL_REGS:
+		return PR_WRITE_EXCLUSIVE_ALL_REGS;
+	case SCSI_PR_EXCLUSIVE_ACCESS_ALL_REGS:
+		return PR_EXCLUSIVE_ACCESS_ALL_REGS;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(scsi_pr_type_to_block);
+
+enum scsi_pr_type block_pr_type_to_scsi(enum pr_type type)
+{
+	switch (type) {
+	case PR_WRITE_EXCLUSIVE:
+		return SCSI_PR_WRITE_EXCLUSIVE;
+	case PR_EXCLUSIVE_ACCESS:
+		return SCSI_PR_EXCLUSIVE_ACCESS;
+	case PR_WRITE_EXCLUSIVE_REG_ONLY:
+		return SCSI_PR_WRITE_EXCLUSIVE_REG_ONLY;
+	case PR_EXCLUSIVE_ACCESS_REG_ONLY:
+		return SCSI_PR_EXCLUSIVE_ACCESS_REG_ONLY;
+	case PR_WRITE_EXCLUSIVE_ALL_REGS:
+		return SCSI_PR_WRITE_EXCLUSIVE_ALL_REGS;
+	case PR_EXCLUSIVE_ACCESS_ALL_REGS:
+		return SCSI_PR_EXCLUSIVE_ACCESS_ALL_REGS;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(block_pr_type_to_scsi);
 
 /**
  * scsilun_to_int - convert a scsi_lun to an int
@@ -138,6 +191,8 @@ EXPORT_SYMBOL(int_to_scsilun);
 bool scsi_normalize_sense(const u8 *sense_buffer, int sb_len,
 			  struct scsi_sense_hdr *sshdr)
 {
+	u8 asc = 0, ascq = 0;
+
 	memset(sshdr, 0, sizeof(struct scsi_sense_hdr));
 
 	if (!sense_buffer || !sb_len)
@@ -155,9 +210,9 @@ bool scsi_normalize_sense(const u8 *sense_buffer, int sb_len,
 		if (sb_len > 1)
 			sshdr->sense_key = (sense_buffer[1] & 0xf);
 		if (sb_len > 2)
-			sshdr->asc = sense_buffer[2];
+			asc = sense_buffer[2];
 		if (sb_len > 3)
-			sshdr->ascq = sense_buffer[3];
+			ascq = sense_buffer[3];
 		if (sb_len > 7)
 			sshdr->additional_length = sense_buffer[7];
 	} else {
@@ -167,14 +222,15 @@ bool scsi_normalize_sense(const u8 *sense_buffer, int sb_len,
 		if (sb_len > 2)
 			sshdr->sense_key = (sense_buffer[2] & 0xf);
 		if (sb_len > 7) {
-			sb_len = (sb_len < (sense_buffer[7] + 8)) ?
-					 sb_len : (sense_buffer[7] + 8);
+			sb_len = min(sb_len, sense_buffer[7] + 8);
 			if (sb_len > 12)
-				sshdr->asc = sense_buffer[12];
+				asc = sense_buffer[12];
 			if (sb_len > 13)
-				sshdr->ascq = sense_buffer[13];
+				ascq = sense_buffer[13];
 		}
 	}
+
+	sshdr->sense_code = scsi_sense_code(asc, ascq);
 
 	return true;
 }
@@ -220,17 +276,19 @@ const u8 * scsi_sense_desc_find(const u8 * sense_buffer, int sb_len,
 EXPORT_SYMBOL(scsi_sense_desc_find);
 
 /**
- * scsi_build_sense_buffer - build sense data in a buffer
+ * scsi_set_sense_buffer - build sense data in a buffer
  * @desc:	Sense format (non-zero == descriptor format,
  *              0 == fixed format)
  * @buf:	Where to build sense data
  * @key:	Sense key
- * @asc:	Additional sense code
- * @ascq:	Additional sense code qualifier
+ * @code:	Additional sense code and sense code qualifier
  *
  **/
-void scsi_build_sense_buffer(int desc, u8 *buf, u8 key, u8 asc, u8 ascq)
+void scsi_set_sense_buffer(int desc, u8 *buf, u8 key, u16 code)
 {
+	u8 asc = scsi_sense_code_asc(code);
+	u8 ascq = scsi_sense_code_ascq(code);
+
 	if (desc) {
 		buf[0] = 0x72;	/* descriptor, current */
 		buf[1] = key;
@@ -245,7 +303,7 @@ void scsi_build_sense_buffer(int desc, u8 *buf, u8 key, u8 asc, u8 ascq)
 		buf[13] = ascq;
 	}
 }
-EXPORT_SYMBOL(scsi_build_sense_buffer);
+EXPORT_SYMBOL(scsi_set_sense_buffer);
 
 /**
  * scsi_set_sense_information - set the information field in a

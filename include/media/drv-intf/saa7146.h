@@ -77,13 +77,10 @@ struct saa7146_pci_extension_data {
 	void *ext_priv;			/* most likely a name string */
 };
 
-#define MAKE_EXTENSION_PCI(x_var, x_vendor, x_device)		\
-	{							\
-		.vendor    = PCI_VENDOR_ID_PHILIPS,		\
-		.device	   = PCI_DEVICE_ID_PHILIPS_SAA7146,	\
-		.subvendor = x_vendor,				\
-		.subdevice = x_device,				\
-		.driver_data = (unsigned long)& x_var,		\
+#define MAKE_EXTENSION_PCI(x_var, x_vendor, x_device)						\
+	{											\
+		PCI_VDEVICE_SUB(PHILIPS, PCI_DEVICE_ID_PHILIPS_SAA7146, (x_vendor), (x_device)),\
+		.driver_data = (unsigned long)&(x_var),						\
 	}
 
 struct saa7146_extension
@@ -139,7 +136,7 @@ struct saa7146_dev
 	void				*ext_priv;	/* pointer for extension private use (most likely some private data) */
 	struct saa7146_ext_vv		*ext_vv_data;
 
-	/* per device video/vbi informations (if available) */
+	/* per device video/vbi information (if available) */
 	struct saa7146_vv	*vv_data;
 	void (*vv_callback)(struct saa7146_dev *dev, unsigned long status);
 

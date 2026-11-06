@@ -1,5 +1,6 @@
 /*
  * Copyright 2012-16 Advanced Micro Devices, Inc.
+ * Copyright 2019 Raptor Engineering, LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -26,13 +27,20 @@
 #ifndef _OS_TYPES_H_
 #define _OS_TYPES_H_
 
+#include <linux/compiler_attributes.h>
+#include <linux/slab.h>
+#include <linux/kgdb.h>
+#include <linux/delay.h>
+#include <linux/mm.h>
+#include <linux/vmalloc.h>
+
 #include <asm/byteorder.h>
-#include <linux/types.h>
-#include <drm/drmP.h>
 
-#include <linux/kref.h>
+#include <drm/display/drm_dp_helper.h>
+#include <drm/drm_device.h>
+#include <drm/drm_print.h>
 
-#include "cgs_linux.h"
+#include "cgs_common.h"
 
 #if defined(__BIG_ENDIAN) && !defined(BIGENDIAN_CPU)
 #define BIGENDIAN_CPU
@@ -40,16 +48,24 @@
 #define LITTLEENDIAN_CPU
 #endif
 
-#undef READ
-#undef WRITE
 #undef FRAME_SIZE
 
 #define dm_output_to_console(fmt, ...) DRM_DEBUG_KMS(fmt, ##__VA_ARGS__)
 
 #define dm_error(fmt, ...) DRM_ERROR(fmt, ##__VA_ARGS__)
 
-#if defined(CONFIG_DRM_AMD_DC_DCN1_0)
-#include <asm/fpu/api.h>
+#if defined(CONFIG_DRM_AMD_DC_FP)
+#include "amdgpu_dm/dc_fpu.h"
+#endif /* CONFIG_DRM_AMD_DC_FP */
+
+
+/*
+ * On Linux this is provided by <linux/kconfig.h> and evaluates Kconfig
+ * options for both built-in (=y) and module (=m) cases. Windows has no
+ * Kconfig, so config options are never set here and this always yields 0.
+ */
+#ifndef IS_ENABLED
+#define IS_ENABLED(option) 0
 #endif
 
 /*
@@ -57,28 +73,45 @@
  * general debug capabilities
  *
  */
-#if defined(CONFIG_HAVE_KGDB) || defined(CONFIG_KGDB)
-#define ASSERT_CRITICAL(expr) do {	\
-	if (WARN_ON(!(expr))) { \
-		kgdb_breakpoint(); \
-	} \
-} while (0)
+#ifdef CONFIG_DEBUG_KERNEL_DC
+#define dc_breakpoint()		kgdb_breakpoint()
 #else
-#define ASSERT_CRITICAL(expr) do {	\
-	if (WARN_ON(!(expr))) { \
-		; \
-	} \
-} while (0)
+#define dc_breakpoint()		do {} while (0)
 #endif
 
-#if defined(CONFIG_DEBUG_KERNEL_DC)
+#ifdef __COVERITY__
+/*
+ * Static analysers see the WARN_ON() test as proof that the asserted condition
+ * can fail, then keep walking the failing path because nothing stops it. Model
+ * the assert as a path terminator so only genuinely reachable defects survive.
+ * __COVERITY__ is defined during analysis capture only, so the code emitted by
+ * a real build is unchanged.
+ */
+void __coverity_panic__(void);
+
+#define ASSERT_CRITICAL(expr) do {		\
+		if (!(expr))			\
+			__coverity_panic__();	\
+	} while (0)
+
 #define ASSERT(expr) ASSERT_CRITICAL(expr)
-
 #else
-#define ASSERT(expr) WARN_ON(!(expr))
+#define ASSERT_CRITICAL(expr) do {		\
+		if (WARN_ON(!(expr)))		\
+			dc_breakpoint();	\
+	} while (0)
+
+#define ASSERT(expr) do {			\
+		if (WARN_ON_ONCE(!(expr)))	\
+			dc_breakpoint();	\
+	} while (0)
 #endif
 
-#define BREAK_TO_DEBUGGER() ASSERT(0)
+#define BREAK_TO_DEBUGGER() \
+	do { \
+		DRM_DEBUG_DRIVER("%s():%d\n", __func__, __LINE__); \
+		dc_breakpoint(); \
+	} while (0)
 
 #define DC_ERR(...)  do { \
 	dm_error(__VA_ARGS__); \

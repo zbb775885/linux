@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * CM3323 - Capella Color Light Sensor
  *
  * Copyright (c) 2015, Intel Corporation.
- *
- * This file is subject to the terms and conditions of version 2 of
- * the GNU General Public License.  See the file COPYING in the main
- * directory of this archive for more details.
  *
  * IIO driver for CM3323 (7-bit I2C slave address 0x10)
  *
@@ -83,36 +80,33 @@ static int cm3323_init(struct iio_dev *indio_dev)
 {
 	int ret;
 	struct cm3323_data *data = iio_priv(indio_dev);
+	struct device *dev = &data->client->dev;
 
 	ret = i2c_smbus_read_word_data(data->client, CM3323_CMD_CONF);
-	if (ret < 0) {
-		dev_err(&data->client->dev, "Error reading reg_conf\n");
-		return ret;
-	}
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Error reading reg_conf\n");
 
 	/* enable sensor and set auto force mode */
 	ret &= ~(CM3323_CONF_SD_BIT | CM3323_CONF_AF_BIT);
-
-	ret = i2c_smbus_write_word_data(data->client, CM3323_CMD_CONF, ret);
-	if (ret < 0) {
-		dev_err(&data->client->dev, "Error writing reg_conf\n");
-		return ret;
-	}
-
 	data->reg_conf = ret;
+
+	ret = i2c_smbus_write_word_data(data->client, CM3323_CMD_CONF, data->reg_conf);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Error writing reg_conf\n");
 
 	return 0;
 }
 
-static void cm3323_disable(struct iio_dev *indio_dev)
+static void cm3323_disable(void *data)
 {
 	int ret;
-	struct cm3323_data *data = iio_priv(indio_dev);
+	struct iio_dev *indio_dev = data;
+	struct cm3323_data *cm_data = iio_priv(indio_dev);
 
-	ret = i2c_smbus_write_word_data(data->client, CM3323_CMD_CONF,
+	ret = i2c_smbus_write_word_data(cm_data->client, CM3323_CMD_CONF,
 					CM3323_CONF_SD_BIT);
 	if (ret < 0)
-		dev_err(&data->client->dev, "Error writing reg_conf\n");
+		dev_err(&cm_data->client->dev, "Error writing reg_conf\n");
 }
 
 static int cm3323_set_it_bits(struct cm3323_data *data, int val, int val2)
@@ -216,8 +210,7 @@ static const struct iio_info cm3323_info = {
 	.attrs		= &cm3323_attribute_group,
 };
 
-static int cm3323_probe(struct i2c_client *client,
-			const struct i2c_device_id *id)
+static int cm3323_probe(struct i2c_client *client)
 {
 	struct cm3323_data *data;
 	struct iio_dev *indio_dev;
@@ -233,7 +226,6 @@ static int cm3323_probe(struct i2c_client *client,
 
 	mutex_init(&data->mutex);
 
-	indio_dev->dev.parent = &client->dev;
 	indio_dev->info = &cm3323_info;
 	indio_dev->name = CM3323_DRV_NAME;
 	indio_dev->channels = cm3323_channels;
@@ -241,45 +233,34 @@ static int cm3323_probe(struct i2c_client *client,
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	ret = cm3323_init(indio_dev);
-	if (ret < 0) {
-		dev_err(&client->dev, "cm3323 chip init failed\n");
+	if (ret < 0)
 		return ret;
-	}
 
-	ret = iio_device_register(indio_dev);
-	if (ret < 0) {
-		dev_err(&client->dev, "failed to register iio dev\n");
-		goto err_init;
-	}
+	ret = devm_add_action_or_reset(&client->dev, cm3323_disable, indio_dev);
+	if (ret < 0)
+		return ret;
 
-	return 0;
-err_init:
-	cm3323_disable(indio_dev);
-	return ret;
-}
-
-static int cm3323_remove(struct i2c_client *client)
-{
-	struct iio_dev *indio_dev = i2c_get_clientdata(client);
-
-	iio_device_unregister(indio_dev);
-	cm3323_disable(indio_dev);
-
-	return 0;
+	return devm_iio_device_register(&client->dev, indio_dev);
 }
 
 static const struct i2c_device_id cm3323_id[] = {
-	{"cm3323", 0},
-	{}
+	{ .name = "cm3323" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, cm3323_id);
+
+static const struct of_device_id cm3323_of_match[] = {
+	{ .compatible = "capella,cm3323", },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, cm3323_of_match);
 
 static struct i2c_driver cm3323_driver = {
 	.driver = {
 		.name = CM3323_DRV_NAME,
+		.of_match_table = cm3323_of_match,
 	},
 	.probe		= cm3323_probe,
-	.remove		= cm3323_remove,
 	.id_table	= cm3323_id,
 };
 

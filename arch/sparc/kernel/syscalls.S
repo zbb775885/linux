@@ -27,15 +27,6 @@ sys32_execveat:
 #endif
 
 	.align	32
-sys_sparc_pipe:
-	ba,pt	%xcc, sys_sparc_pipe_real
-	 add	%sp, PTREGS_OFF, %o0
-sys_nis_syscall:
-	ba,pt	%xcc, c_sys_nis_syscall
-	 add	%sp, PTREGS_OFF, %o0
-sys_memory_ordering:
-	ba,pt	%xcc, sparc_memory_ordering
-	 add	%sp, PTREGS_OFF, %o1
 #ifdef CONFIG_COMPAT
 sys32_sigstack:
 	ba,pt	%xcc, do_sys32_sigstack
@@ -95,19 +86,28 @@ sys32_rt_sigreturn:
 	 * during system calls...
 	 */
 	.align	32
-sys_vfork: /* Under Linux, vfork and fork are just special cases of clone. */
-	sethi	%hi(0x4000 | 0x0100 | SIGCHLD), %o0
-	or	%o0, %lo(0x4000 | 0x0100 | SIGCHLD), %o0
-	ba,pt	%xcc, sys_clone
+sys_vfork:
+	flushw
+	ba,pt	%xcc, sparc_vfork
+	 add	%sp, PTREGS_OFF, %o0
+
+	.align	32
 sys_fork:
-	 clr	%o1
-	mov	SIGCHLD, %o0
+	flushw
+	ba,pt	%xcc, sparc_fork
+	 add	%sp, PTREGS_OFF, %o0
+
+	.align	32
 sys_clone:
 	flushw
-	movrz	%o1, %fp, %o1
-	mov	0, %o3
-	ba,pt	%xcc, sparc_do_fork
-	 add	%sp, PTREGS_OFF, %o2
+	ba,pt	%xcc, sparc_clone
+	 add	%sp, PTREGS_OFF, %o0
+
+	.align	32
+__sys_clone3:
+	flushw
+	ba,pt	%xcc, sparc_clone3
+	 add	%sp, PTREGS_OFF, %o0
 
 	.globl	ret_from_fork
 ret_from_fork:
@@ -119,6 +119,8 @@ ret_from_fork:
 	brnz,pt	%o0, ret_sys_call
 	 ldx	[%g6 + TI_FLAGS], %l0
 	ldx	[%sp + PTREGS_OFF + PT_V9_G1], %l1
+	brz,pt	%l1, ret_sys_call
+	 nop
 	call	%l1
 	 ldx	[%sp + PTREGS_OFF + PT_V9_G2], %o0
 	ba,pt	%xcc, ret_sys_call

@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SH7722 Setup
  *
  *  Copyright (C) 2006 - 2008  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/mm.h>
@@ -19,8 +16,8 @@
 #include <linux/usb/m66592.h>
 
 #include <asm/clock.h>
-#include <asm/mmzone.h>
 #include <asm/siu.h>
+#include <asm/platform_early.h>
 
 #include <cpu/dma-register.h>
 #include <cpu/sh7722.h>
@@ -515,7 +512,7 @@ static struct platform_device *sh7722_early_devices[] __initdata = {
 
 void __init plat_early_device_setup(void)
 {
-	early_platform_add_devices(sh7722_early_devices,
+	sh_early_platform_add_devices(sh7722_early_devices,
 				   ARRAY_SIZE(sh7722_early_devices));
 }
 
@@ -659,10 +656,4 @@ static struct intc_desc intc_desc __initdata = {
 void __init plat_irq_setup(void)
 {
 	register_intc_controller(&intc_desc);
-}
-
-void __init plat_mem_setup(void)
-{
-	/* Register the URAM space as Node 1 */
-	setup_bootmem_node(1, 0x055f0000, 0x05610000);
 }

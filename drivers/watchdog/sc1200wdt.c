@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	National Semiconductor PC87307/PC97307 (ala SC1200) WDT driver
  *	(c) Copyright 2002 Zwane Mwaikambo <zwane@commfireservices.com>,
  *			All Rights Reserved.
  *	Based on wdt.c and wdt977.c by Alan Cox and Woody Suwalski respectively.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  *
  *	The author(s) of this software shall not be held liable for damages
  *	of any nature resulting due to the use of this software. This
@@ -28,7 +24,6 @@
  *	20020530 Joel Becker		Add Matt Domsch's nowayout module
  *					option
  *	20030116 Adam Belay		Updated to the latest pnp code
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -47,6 +42,7 @@
 #include <linux/semaphore.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
+#include <linux/stringify.h>
 
 #define SC1200_MODULE_VER	"build 20020303"
 #define SC1200_MODULE_NAME	"sc1200wdt"
@@ -97,7 +93,7 @@ static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 	"Watchdog cannot be stopped once started (default="
-				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+				__stringify(WATCHDOG_NOWAYOUT) ")");
 
 
 
@@ -178,7 +174,7 @@ static int sc1200wdt_open(struct inode *inode, struct file *file)
 	sc1200wdt_start();
 	pr_info("Watchdog enabled, timeout = %d min(s)", timeout);
 
-	return nonseekable_open(inode, file);
+	return stream_open(inode, file);
 }
 
 
@@ -239,7 +235,7 @@ static long sc1200wdt_ioctl(struct file *file, unsigned int cmd,
 			return -EINVAL;
 		timeout = new_timeout;
 		sc1200wdt_write_data(WDTO, timeout);
-		/* fall through and return the new timeout */
+		fallthrough;	/* and return the new timeout */
 
 	case WDIOC_GETTIMEOUT:
 		return put_user(timeout * 60, p);
@@ -309,9 +305,9 @@ static struct notifier_block sc1200wdt_notifier = {
 
 static const struct file_operations sc1200wdt_fops = {
 	.owner		= THIS_MODULE,
-	.llseek		= no_llseek,
 	.write		= sc1200wdt_write,
 	.unlocked_ioctl = sc1200wdt_ioctl,
+	.compat_ioctl	= compat_ptr_ioctl,
 	.open		= sc1200wdt_open,
 	.release	= sc1200wdt_release,
 };
@@ -344,8 +340,8 @@ static int __init sc1200wdt_probe(void)
 
 static const struct pnp_device_id scl200wdt_pnp_devices[] = {
 	/* National Semiconductor PC87307/PC97307 watchdog component */
-	{.id = "NSC0800", .driver_data = 0},
-	{.id = ""},
+	{ .id = "NSC0800" },
+	{ }
 };
 
 static int scl200wdt_pnp_probe(struct pnp_dev *dev,

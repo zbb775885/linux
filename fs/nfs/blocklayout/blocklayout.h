@@ -104,18 +104,24 @@ struct pnfs_block_dev {
 	u64				start;
 	u64				len;
 
+	enum pnfs_block_volume_type	type;
 	u32				nr_children;
 	struct pnfs_block_dev		*children;
 	u64				chunk_size;
 
-	struct block_device		*bdev;
+	struct file			*bdev_file;
 	u64				disk_offset;
+	unsigned long			flags;
 
 	u64				pr_key;
-	bool				pr_registered;
 
 	bool (*map)(struct pnfs_block_dev *dev, u64 offset,
 			struct pnfs_block_dev_map *map);
+};
+
+/* pnfs_block_dev flag bits */
+enum {
+	PNFS_BDEV_REGISTERED = 0,
 };
 
 /* sector_t fields are all in 512-byte sectors */
@@ -155,11 +161,6 @@ BLK_LSEG2EXT(struct pnfs_layout_segment *lseg)
 	return BLK_LO2EXT(lseg->pls_layout);
 }
 
-struct bl_pipe_msg {
-	struct rpc_pipe_msg msg;
-	wait_queue_head_t *bl_wq;
-};
-
 struct bl_msg_hdr {
 	u8  type;
 	u16 totallen; /* length of entire message, including hdr itself */
@@ -172,6 +173,7 @@ struct bl_msg_hdr {
 #define BL_DEVICE_REQUEST_ERR          0x2 /* User level process fails */
 
 /* dev.c */
+bool bl_register_dev(struct pnfs_block_dev *d);
 struct nfs4_deviceid_node *bl_alloc_deviceid_node(struct nfs_server *server,
 		struct pnfs_device *pdev, gfp_t gfp_mask);
 void bl_free_deviceid_node(struct nfs4_deviceid_node *d);

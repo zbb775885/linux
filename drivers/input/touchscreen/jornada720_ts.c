@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * drivers/input/touchscreen/jornada720_ts.c
  *
@@ -5,10 +6,6 @@
  *
  *  Copyright (C) 2006 Filip Zyzniewski <filip.zyzniewski@tefnet.pl>
  *  based on HP Jornada 56x touchscreen driver by Alex Lange <chicken@handhelds.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * HP Jornada 710/720/729 Touchscreen Driver
  */
@@ -126,7 +123,6 @@ static int jornada720_ts_probe(struct platform_device *pdev)
 	input_dev->name = "HP Jornada 7xx Touchscreen";
 	input_dev->phys = "jornadats/input0";
 	input_dev->id.bustype = BUS_HOST;
-	input_dev->dev.parent = &pdev->dev;
 
 	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_ABS);
 	input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);

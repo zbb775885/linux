@@ -10,10 +10,12 @@
 #include <linux/fsl_devices.h>
 #include <linux/err.h>
 #include <linux/io.h>
-#include <linux/of_platform.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/clk.h>
 #include <linux/module.h>
 #include <linux/dma-mapping.h>
+#include <linux/regulator/consumer.h>
 
 struct fsl_usb2_dev_data {
 	char *dr_mode;		/* controller mode */
@@ -94,10 +96,13 @@ static struct platform_device *fsl_usb2_device_register(
 
 	pdev->dev.coherent_dma_mask = ofdev->dev.coherent_dma_mask;
 
-	if (!pdev->dev.dma_mask)
+	if (!pdev->dev.dma_mask) {
 		pdev->dev.dma_mask = &ofdev->dev.coherent_dma_mask;
-	else
-		dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+	} else {
+		retval = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
+		if (retval)
+			goto error;
+	}
 
 	retval = platform_device_add_data(pdev, pdata, sizeof(*pdata));
 	if (retval)
@@ -108,6 +113,8 @@ static struct platform_device *fsl_usb2_device_register(
 		if (retval)
 			goto error;
 	}
+
+	device_set_of_node_from_dev(&pdev->dev, &ofdev->dev);
 
 	retval = platform_device_add(pdev);
 	if (retval)
@@ -177,7 +184,7 @@ static int fsl_usb2_mph_dr_of_probe(struct platform_device *ofdev)
 	const struct of_device_id *match;
 	const unsigned char *prop;
 	static unsigned int idx;
-	int i;
+	int i, err;
 
 	if (!of_device_is_available(np))
 		return -ENODEV;
@@ -195,19 +202,16 @@ static int fsl_usb2_mph_dr_of_probe(struct platform_device *ofdev)
 	dev_data = get_dr_mode_data(np);
 
 	if (of_device_is_compatible(np, "fsl-usb2-mph")) {
-		if (of_get_property(np, "port0", NULL))
+		if (of_property_present(np, "port0"))
 			pdata->port_enables |= FSL_USB2_PORT0_ENABLED;
 
-		if (of_get_property(np, "port1", NULL))
+		if (of_property_present(np, "port1"))
 			pdata->port_enables |= FSL_USB2_PORT1_ENABLED;
 
 		pdata->operating_mode = FSL_USB2_MPH_HOST;
 	} else {
-		if (of_get_property(np, "fsl,invert-drvvbus", NULL))
-			pdata->invert_drvvbus = 1;
-
-		if (of_get_property(np, "fsl,invert-pwr-fault", NULL))
-			pdata->invert_pwr_fault = 1;
+		pdata->invert_drvvbus = of_property_read_bool(np, "fsl,invert-drvvbus");
+		pdata->invert_pwr_fault = of_property_read_bool(np, "fsl,invert-pwr-fault");
 
 		/* setup mode selected in the device tree */
 		pdata->operating_mode = dev_data->op_mode;
@@ -224,6 +228,10 @@ static int fsl_usb2_mph_dr_of_probe(struct platform_device *ofdev)
 		of_property_read_bool(np, "fsl,usb-erratum-a005275");
 	pdata->has_fsl_erratum_a005697 =
 		of_property_read_bool(np, "fsl,usb_erratum-a005697");
+	pdata->has_fsl_erratum_a006918 =
+		of_property_read_bool(np, "fsl,usb_erratum-a006918");
+	pdata->has_fsl_erratum_14 =
+		of_property_read_bool(np, "fsl,usb_erratum-14");
 
 	/*
 	 * Determine whether phy_clk_valid needs to be checked
@@ -238,6 +246,10 @@ static int fsl_usb2_mph_dr_of_probe(struct platform_device *ofdev)
 			return -ENODEV;
 		}
 	}
+
+	err = devm_regulator_get_enable_optional(&ofdev->dev, "vbus");
+	if (err)
+		return dev_err_probe(&ofdev->dev, err, "failed to get vbus regulator\n");
 
 	for (i = 0; i < ARRAY_SIZE(dev_data->drivers); i++) {
 		if (!dev_data->drivers[i])
@@ -259,10 +271,9 @@ static int __unregister_subdev(struct device *dev, void *d)
 	return 0;
 }
 
-static int fsl_usb2_mph_dr_of_remove(struct platform_device *ofdev)
+static void fsl_usb2_mph_dr_of_remove(struct platform_device *ofdev)
 {
 	device_for_each_child(&ofdev->dev, NULL, __unregister_subdev);
-	return 0;
 }
 
 #ifdef CONFIG_PPC_MPC512x
@@ -282,7 +293,7 @@ static int fsl_usb2_mph_dr_of_remove(struct platform_device *ofdev)
 #define PHYCTRL_LSFE		(1 << 1)	/* Line State Filter Enable */
 #define PHYCTRL_PXE		(1 << 0)	/* PHY oscillator enable */
 
-int fsl_usb2_mpc5121_init(struct platform_device *pdev)
+static int fsl_usb2_mpc5121_init(struct platform_device *pdev)
 {
 	struct fsl_usb2_platform_data *pdata = dev_get_platdata(&pdev->dev);
 	struct clk *clk;
@@ -321,8 +332,7 @@ static void fsl_usb2_mpc5121_exit(struct platform_device *pdev)
 
 	pdata->regs = NULL;
 
-	if (pdata->clk)
-		clk_disable_unprepare(pdata->clk);
+	clk_disable_unprepare(pdata->clk);
 }
 
 static struct fsl_usb2_platform_data fsl_usb2_mpc5121_pd = {
@@ -356,7 +366,7 @@ static struct platform_driver fsl_usb2_mph_dr_driver = {
 		.of_match_table = fsl_usb2_mph_dr_of_match,
 	},
 	.probe	= fsl_usb2_mph_dr_of_probe,
-	.remove	= fsl_usb2_mph_dr_of_remove,
+	.remove = fsl_usb2_mph_dr_of_remove,
 };
 
 module_platform_driver(fsl_usb2_mph_dr_driver);

@@ -26,6 +26,7 @@
 
 #include <linux/delay.h>
 #include <linux/hw_random.h>
+#include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
@@ -46,9 +47,9 @@
  * want to register another driver on the same PCI id.
  */
 static const struct pci_device_id pci_tbl[] = {
-	{ PCI_VDEVICE(AMD, 0x7443), 0, },
-	{ PCI_VDEVICE(AMD, 0x746b), 0, },
-	{ 0, },	/* terminate list */
+	{ PCI_VDEVICE(AMD, 0x7443) },
+	{ PCI_VDEVICE(AMD, 0x746b) },
+	{ }	/* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, pci_tbl);
 
@@ -79,7 +80,7 @@ static int amd_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
 				if (timeout-- == 0)
 					return read;
 			} else {
-				return 0;
+				return read;
 			}
 		} else {
 			*data = ioread32(priv->iobase + RNGDATA);
@@ -124,47 +125,49 @@ static struct hwrng amd_rng = {
 	.read		= amd_rng_read,
 };
 
-static int __init mod_init(void)
+static int __init amd_rng_mod_init(void)
 {
-	int err = -ENODEV;
+	int err;
 	struct pci_dev *pdev = NULL;
-	const struct pci_device_id *ent;
 	u32 pmbase;
 	struct amd768_priv *priv;
 
-	for_each_pci_dev(pdev) {
-		ent = pci_match_id(pci_tbl, pdev);
-		if (ent)
-			goto found;
-	}
-	/* Device not found. */
-	return -ENODEV;
+	for_each_pci_dev(pdev)
+		if (pci_match_id(pci_tbl, pdev))
+			break;
+	if (!pdev)
+		return -ENODEV;
 
-found:
 	err = pci_read_config_dword(pdev, 0x58, &pmbase);
-	if (err)
-		return err;
+	if (err) {
+		err = pcibios_err_to_errno(err);
+		goto put_dev;
+	}
 
 	pmbase &= 0x0000FF00;
-	if (pmbase == 0)
-		return -EIO;
+	if (pmbase == 0) {
+		err = -EIO;
+		goto put_dev;
+	}
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
-	if (!priv)
-		return -ENOMEM;
+	priv = kzalloc_obj(*priv);
+	if (!priv) {
+		err = -ENOMEM;
+		goto put_dev;
+	}
 
 	if (!request_region(pmbase + PMBASE_OFFSET, PMBASE_SIZE, DRV_NAME)) {
 		dev_err(&pdev->dev, DRV_NAME " region 0x%x already in use!\n",
-			pmbase + 0xF0);
+			pmbase + PMBASE_OFFSET);
 		err = -EBUSY;
 		goto out;
 	}
 
 	priv->iobase = ioport_map(pmbase + PMBASE_OFFSET, PMBASE_SIZE);
 	if (!priv->iobase) {
-		pr_err(DRV_NAME "Cannot map ioport\n");
+		pr_err(DRV_NAME " cannot map ioport\n");
 		err = -EINVAL;
-		goto err_iomap;
+		goto err;
 	}
 
 	amd_rng.priv = (unsigned long)priv;
@@ -175,20 +178,21 @@ found:
 	err = hwrng_register(&amd_rng);
 	if (err) {
 		pr_err(DRV_NAME " registering failed (%d)\n", err);
-		goto err_hwrng;
+		ioport_unmap(priv->iobase);
+		goto err;
 	}
 	return 0;
 
-err_hwrng:
-	ioport_unmap(priv->iobase);
-err_iomap:
+err:
 	release_region(pmbase + PMBASE_OFFSET, PMBASE_SIZE);
 out:
 	kfree(priv);
+put_dev:
+	pci_dev_put(pdev);
 	return err;
 }
 
-static void __exit mod_exit(void)
+static void __exit amd_rng_mod_exit(void)
 {
 	struct amd768_priv *priv;
 
@@ -200,11 +204,13 @@ static void __exit mod_exit(void)
 
 	release_region(priv->pmbase + PMBASE_OFFSET, PMBASE_SIZE);
 
+	pci_dev_put(priv->pcidev);
+
 	kfree(priv);
 }
 
-module_init(mod_init);
-module_exit(mod_exit);
+module_init(amd_rng_mod_init);
+module_exit(amd_rng_mod_exit);
 
 MODULE_AUTHOR("The Linux Kernel team");
 MODULE_DESCRIPTION("H/W RNG driver for AMD chipsets");

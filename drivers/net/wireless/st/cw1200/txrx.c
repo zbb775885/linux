@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Datapath implementation for ST-Ericsson CW1200 mac80211 drivers
  *
  * Copyright (c) 2010, ST-Ericsson
  * Author: Dmitry Tarnyagin <dmitry.tarnyagin@lockless.no>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <net/mac80211.h>
@@ -17,6 +14,7 @@
 #include "wsm.h"
 #include "bh.h"
 #include "sta.h"
+#include "hwbus.h"
 #include "debug.h"
 
 #define CW1200_INVALID_RATE_ID (0xFF)
@@ -624,9 +622,9 @@ cw1200_tx_h_bt(struct cw1200_common *priv,
 			priority = WSM_EPTA_PRIORITY_ACTION;
 		else if (ieee80211_is_mgmt(t->hdr->frame_control))
 			priority = WSM_EPTA_PRIORITY_MGT;
-		else if ((wsm->queue_id == WSM_QUEUE_VOICE))
+		else if (wsm->queue_id == WSM_QUEUE_VOICE)
 			priority = WSM_EPTA_PRIORITY_VOICE;
-		else if ((wsm->queue_id == WSM_QUEUE_VIDEO))
+		else if (wsm->queue_id == WSM_QUEUE_VIDEO)
 			priority = WSM_EPTA_PRIORITY_VIDEO;
 		else
 			priority = WSM_EPTA_PRIORITY_DATA;
@@ -653,7 +651,7 @@ cw1200_tx_h_rate_policy(struct cw1200_common *priv,
 	wsm->flags |= t->txpriv.rate_id << 4;
 
 	t->rate = cw1200_get_tx_rate(priv,
-		&t->tx_info->control.rates[0]),
+		&t->tx_info->control.rates[0]);
 	wsm->max_tx_rate = t->rate->hw_value;
 	if (t->rate->flags & IEEE80211_TX_RC_MCS) {
 		if (cw1200_ht_greenfield(&priv->ht_info))
@@ -718,7 +716,8 @@ void cw1200_tx(struct ieee80211_hw *dev,
 	};
 	struct ieee80211_sta *sta;
 	struct wsm_tx *wsm;
-	bool tid_update = 0;
+	bool tid_update = false;
+	size_t pad_len;
 	u8 flags = 0;
 	int ret;
 
@@ -765,8 +764,19 @@ void cw1200_tx(struct ieee80211_hw *dev,
 	if (ret)
 		goto drop;
 
-	rcu_read_lock();
-	sta = rcu_dereference(t.sta);
+	sta = t.sta;
+
+	/*
+	 * The bus transfer is padded up to the bus alignment and the
+	 * padding is transferred from the frame buffer.  Make sure the
+	 * buffer has room for the padding so the device never receives
+	 * data past the end of the frame.
+	 */
+	pad_len = priv->hwbus_ops->align_size(priv->hwbus_priv, skb->len) -
+		skb->len;
+	if (skb_tailroom(skb) < pad_len &&
+	    pskb_expand_head(skb, 0, pad_len, GFP_ATOMIC))
+		goto drop;
 
 	spin_lock_bh(&priv->ps_state_lock);
 	{
@@ -778,8 +788,6 @@ void cw1200_tx(struct ieee80211_hw *dev,
 
 	if (tid_update && sta)
 		ieee80211_sta_set_buffered(sta, t.txpriv.tid, true);
-
-	rcu_read_unlock();
 
 	cw1200_bh_wakeup(priv);
 
@@ -1000,7 +1008,7 @@ void cw1200_skb_dtor(struct cw1200_common *priv,
 					  txpriv->raw_link_id, txpriv->tid);
 		tx_policy_put(priv, txpriv->rate_id);
 	}
-	ieee80211_tx_status(priv->hw, skb);
+	ieee80211_tx_status_skb(priv->hw, skb);
 }
 
 void cw1200_rx_cb(struct cw1200_common *priv,
@@ -1042,7 +1050,7 @@ void cw1200_rx_cb(struct cw1200_common *priv,
 		schedule_work(&priv->linkid_reset_work);
 	}
 
-	if (link_id && p2p &&
+	if (link_id && link_id <= CW1200_MAX_STA_IN_AP_MODE && p2p &&
 	    ieee80211_is_action(frame->frame_control) &&
 	    (mgmt->u.action.category == WLAN_CATEGORY_PUBLIC)) {
 		/* Link ID already exists for the ACTION frame.
@@ -1069,7 +1077,7 @@ void cw1200_rx_cb(struct cw1200_common *priv,
 	}
 
 	if (skb->len < sizeof(struct ieee80211_pspoll)) {
-		wiphy_warn(priv->hw->wiphy, "Mailformed SDU rx'ed. Size is lesser than IEEE header.\n");
+		wiphy_warn(priv->hw->wiphy, "Malformed SDU rx'ed. Size is lesser than IEEE header.\n");
 		goto drop;
 	}
 
@@ -1148,8 +1156,7 @@ void cw1200_rx_cb(struct cw1200_common *priv,
 
 	/* Remove TSF from the end of frame */
 	if (arg->flags & WSM_RX_STATUS_TSF_INCLUDED) {
-		memcpy(&hdr->mactime, skb->data + skb->len - 8, 8);
-		hdr->mactime = le64_to_cpu(hdr->mactime);
+		hdr->mactime = get_unaligned_le64(skb->data + skb->len - 8);
 		if (skb->len >= 8)
 			skb_trim(skb, skb->len - 8);
 	} else {
@@ -1173,7 +1180,7 @@ void cw1200_rx_cb(struct cw1200_common *priv,
 		size_t ies_len = skb->len - (ies - (u8 *)(skb->data));
 
 		tim_ie = cfg80211_find_ie(WLAN_EID_TIM, ies, ies_len);
-		if (tim_ie) {
+		if (tim_ie && tim_ie[1] >= sizeof(struct ieee80211_tim_ie)) {
 			struct ieee80211_tim_ie *tim =
 				(struct ieee80211_tim_ie *)&tim_ie[2];
 
@@ -1186,8 +1193,8 @@ void cw1200_rx_cb(struct cw1200_common *priv,
 
 		/* Disable beacon filter once we're associated... */
 		if (priv->disable_beacon_filter &&
-		    (priv->vif->bss_conf.assoc ||
-		     priv->vif->bss_conf.ibss_joined)) {
+		    (priv->vif->cfg.assoc ||
+		     priv->vif->cfg.ibss_joined)) {
 			priv->disable_beacon_filter = false;
 			queue_work(priv->workqueue,
 				   &priv->update_filtering_work);

@@ -1,19 +1,5 @@
-/*
- * Copyright 2012 Cisco Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright 2012 Cisco Systems, Inc.  All rights reserved.
 
 #include <linux/module.h>
 #include <linux/errno.h>
@@ -21,10 +7,22 @@
 #include <linux/vmalloc.h>
 #include "fnic.h"
 
+extern int fnic_get_debug_info(struct stats_debug_info *debug_buffer,
+							   struct fnic *fnic);
+
+static int fnic_nvmef_debugfs_open(struct inode *inode,
+			struct file *file);
+static ssize_t fnic_nvmef_debugfs_read(struct file *file,
+			char __user *ubuf,
+			size_t nbytes, loff_t *pos);
+static int fnic_nvmef_debugfs_release(struct inode *inode,
+			struct file *file);
+
 static struct dentry *fnic_trace_debugfs_root;
 static struct dentry *fnic_trace_debugfs_file;
 static struct dentry *fnic_trace_enable;
 static struct dentry *fnic_stats_debugfs_root;
+static struct dentry *fnic_nvmef_debugfs_root;
 
 static struct dentry *fnic_fc_trace_debugfs_file;
 static struct dentry *fnic_fc_rdata_trace_debugfs_file;
@@ -52,29 +50,16 @@ static struct fc_trace_flag_type *fc_trc_flag;
  */
 int fnic_debugfs_init(void)
 {
-	int rc = -1;
 	fnic_trace_debugfs_root = debugfs_create_dir("fnic", NULL);
-	if (!fnic_trace_debugfs_root) {
-		printk(KERN_DEBUG "Cannot create debugfs root\n");
-		return rc;
-	}
-
-	if (!fnic_trace_debugfs_root) {
-		printk(KERN_DEBUG
-			"fnic root directory doesn't exist in debugfs\n");
-		return rc;
-	}
 
 	fnic_stats_debugfs_root = debugfs_create_dir("statistics",
 						fnic_trace_debugfs_root);
-	if (!fnic_stats_debugfs_root) {
-		printk(KERN_DEBUG "Cannot create Statistics directory\n");
-		return rc;
-	}
+
+	fnic_nvmef_debugfs_root = debugfs_create_dir("nvme_info",
+						     fnic_trace_debugfs_root);
 
 	/* Allocate memory to structure */
-	fc_trc_flag = (struct fc_trace_flag_type *)
-		vmalloc(sizeof(struct fc_trace_flag_type));
+	fc_trc_flag = vmalloc(sizeof(struct fc_trace_flag_type));
 
 	if (fc_trc_flag) {
 		fc_trc_flag->fc_row_file = 0;
@@ -82,10 +67,10 @@ int fnic_debugfs_init(void)
 		fc_trc_flag->fnic_trace = 2;
 		fc_trc_flag->fc_trace = 3;
 		fc_trc_flag->fc_clear = 4;
+		return 0;
 	}
 
-	rc = 0;
-	return rc;
+	return -ENOMEM;
 }
 
 /*
@@ -97,14 +82,16 @@ int fnic_debugfs_init(void)
  */
 void fnic_debugfs_terminate(void)
 {
+	debugfs_remove(fnic_nvmef_debugfs_root);
+	fnic_nvmef_debugfs_root = NULL;
+
 	debugfs_remove(fnic_stats_debugfs_root);
 	fnic_stats_debugfs_root = NULL;
 
 	debugfs_remove(fnic_trace_debugfs_root);
 	fnic_trace_debugfs_root = NULL;
 
-	if (fc_trc_flag)
-		vfree(fc_trc_flag);
+	vfree(fc_trc_flag);
 }
 
 /*
@@ -136,11 +123,11 @@ static ssize_t fnic_trace_ctrl_read(struct file *filp,
 	len = 0;
 	trace_type = (u8 *)filp->private_data;
 	if (*trace_type == fc_trc_flag->fnic_trace)
-		len = sprintf(buf, "%u\n", fnic_tracing_enabled);
+		len = sprintf(buf, "%d\n", fnic_tracing_enabled);
 	else if (*trace_type == fc_trc_flag->fc_trace)
-		len = sprintf(buf, "%u\n", fnic_fc_tracing_enabled);
+		len = sprintf(buf, "%d\n", fnic_fc_tracing_enabled);
 	else if (*trace_type == fc_trc_flag->fc_clear)
-		len = sprintf(buf, "%u\n", fnic_fc_trace_cleared);
+		len = sprintf(buf, "%d\n", fnic_fc_trace_cleared);
 	else
 		pr_err("fnic: Cannot read to any debugfs file\n");
 
@@ -228,29 +215,26 @@ static int fnic_trace_debugfs_open(struct inode *inode,
 	fnic_dbgfs_t *fnic_dbg_prt;
 	u8 *rdata_ptr;
 	rdata_ptr = (u8 *)inode->i_private;
-	fnic_dbg_prt = kzalloc(sizeof(fnic_dbgfs_t), GFP_KERNEL);
+	fnic_dbg_prt = kzalloc_obj(fnic_dbgfs_t);
 	if (!fnic_dbg_prt)
 		return -ENOMEM;
 
 	if (*rdata_ptr == fc_trc_flag->fnic_trace) {
-		fnic_dbg_prt->buffer = vmalloc(3 *
-					(trace_max_pages * PAGE_SIZE));
+		fnic_dbg_prt->buffer = vzalloc(array3_size(3, trace_max_pages,
+							   PAGE_SIZE));
 		if (!fnic_dbg_prt->buffer) {
 			kfree(fnic_dbg_prt);
 			return -ENOMEM;
 		}
-		memset((void *)fnic_dbg_prt->buffer, 0,
-		3 * (trace_max_pages * PAGE_SIZE));
 		fnic_dbg_prt->buffer_len = fnic_get_trace_data(fnic_dbg_prt);
 	} else {
 		fnic_dbg_prt->buffer =
-			vmalloc(3 * (fnic_fc_trace_max_pages * PAGE_SIZE));
+			vzalloc(array3_size(3, fnic_fc_trace_max_pages,
+					    PAGE_SIZE));
 		if (!fnic_dbg_prt->buffer) {
 			kfree(fnic_dbg_prt);
 			return -ENOMEM;
 		}
-		memset((void *)fnic_dbg_prt->buffer, 0,
-			3 * (fnic_fc_trace_max_pages * PAGE_SIZE));
 		fnic_dbg_prt->buffer_len =
 			fnic_fc_trace_get_data(fnic_dbg_prt, *rdata_ptr);
 	}
@@ -355,39 +339,19 @@ static const struct file_operations fnic_trace_debugfs_fops = {
  * it will also create file trace_enable to control enable/disable of
  * trace logging into trace buffer.
  */
-int fnic_trace_debugfs_init(void)
+void fnic_trace_debugfs_init(void)
 {
-	int rc = -1;
-	if (!fnic_trace_debugfs_root) {
-		printk(KERN_DEBUG
-			"FNIC Debugfs root directory doesn't exist\n");
-		return rc;
-	}
 	fnic_trace_enable = debugfs_create_file("tracing_enable",
 					S_IFREG|S_IRUGO|S_IWUSR,
 					fnic_trace_debugfs_root,
 					&(fc_trc_flag->fnic_trace),
 					&fnic_trace_ctrl_fops);
 
-	if (!fnic_trace_enable) {
-		printk(KERN_DEBUG
-			"Cannot create trace_enable file under debugfs\n");
-		return rc;
-	}
-
 	fnic_trace_debugfs_file = debugfs_create_file("trace",
 					S_IFREG|S_IRUGO|S_IWUSR,
 					fnic_trace_debugfs_root,
 					&(fc_trc_flag->fnic_trace),
 					&fnic_trace_debugfs_fops);
-
-	if (!fnic_trace_debugfs_file) {
-		printk(KERN_DEBUG
-			"Cannot create trace file under debugfs\n");
-		return rc;
-	}
-	rc = 0;
-	return rc;
 }
 
 /*
@@ -418,36 +382,19 @@ void fnic_trace_debugfs_terminate(void)
  * trace logging into trace buffer.
  */
 
-int fnic_fc_trace_debugfs_init(void)
+void fnic_fc_trace_debugfs_init(void)
 {
-	int rc = -1;
-
-	if (!fnic_trace_debugfs_root) {
-		pr_err("fnic:Debugfs root directory doesn't exist\n");
-		return rc;
-	}
-
 	fnic_fc_trace_enable = debugfs_create_file("fc_trace_enable",
 					S_IFREG|S_IRUGO|S_IWUSR,
 					fnic_trace_debugfs_root,
 					&(fc_trc_flag->fc_trace),
 					&fnic_trace_ctrl_fops);
 
-	if (!fnic_fc_trace_enable) {
-		pr_err("fnic: Failed create fc_trace_enable file\n");
-		return rc;
-	}
-
 	fnic_fc_trace_clear = debugfs_create_file("fc_trace_clear",
 					S_IFREG|S_IRUGO|S_IWUSR,
 					fnic_trace_debugfs_root,
 					&(fc_trc_flag->fc_clear),
 					&fnic_trace_ctrl_fops);
-
-	if (!fnic_fc_trace_clear) {
-		pr_err("fnic: Failed to create fc_trace_enable file\n");
-		return rc;
-	}
 
 	fnic_fc_rdata_trace_debugfs_file =
 		debugfs_create_file("fc_trace_rdata",
@@ -456,24 +403,12 @@ int fnic_fc_trace_debugfs_init(void)
 				    &(fc_trc_flag->fc_normal_file),
 				    &fnic_trace_debugfs_fops);
 
-	if (!fnic_fc_rdata_trace_debugfs_file) {
-		pr_err("fnic: Failed create fc_rdata_trace file\n");
-		return rc;
-	}
-
 	fnic_fc_trace_debugfs_file =
 		debugfs_create_file("fc_trace",
 				    S_IFREG|S_IRUGO|S_IWUSR,
 				    fnic_trace_debugfs_root,
 				    &(fc_trc_flag->fc_row_file),
 				    &fnic_trace_debugfs_fops);
-
-	if (!fnic_fc_trace_debugfs_file) {
-		pr_err("fnic: Failed to create fc_trace file\n");
-		return rc;
-	}
-	rc = 0;
-	return rc;
 }
 
 /*
@@ -516,7 +451,7 @@ static int fnic_reset_stats_open(struct inode *inode, struct file *file)
 {
 	struct stats_debug_info *debug;
 
-	debug = kzalloc(sizeof(struct stats_debug_info), GFP_KERNEL);
+	debug = kzalloc_obj(struct stats_debug_info);
 	if (!debug)
 		return -ENOMEM;
 
@@ -663,7 +598,7 @@ static int fnic_stats_debugfs_open(struct inode *inode,
 	struct stats_debug_info *debug;
 	int buf_size = 2 * PAGE_SIZE;
 
-	debug = kzalloc(sizeof(struct stats_debug_info), GFP_KERNEL);
+	debug = kzalloc_obj(struct stats_debug_info);
 	if (!debug)
 		return -ENOMEM;
 
@@ -676,6 +611,7 @@ static int fnic_stats_debugfs_open(struct inode *inode,
 	debug->buf_size = buf_size;
 	memset((void *)debug->debug_buffer, 0, buf_size);
 	debug->buffer_len = fnic_get_stats_data(debug, fnic_stats);
+	debug->buffer_len += fnic_get_debug_info(debug, fnic);
 
 	file->private_data = debug;
 
@@ -748,6 +684,13 @@ static const struct file_operations fnic_reset_debugfs_fops = {
 	.release = fnic_reset_stats_release,
 };
 
+static const struct file_operations fnic_nvmef_debugfs_fops = {
+	.owner = THIS_MODULE,
+	.open = fnic_nvmef_debugfs_open,
+	.read = fnic_nvmef_debugfs_read,
+	.release = fnic_nvmef_debugfs_release,
+};
+
 /*
  * fnic_stats_init - Initialize stats struct and create stats file per fnic
  *
@@ -758,43 +701,26 @@ static const struct file_operations fnic_reset_debugfs_fops = {
  */
 int fnic_stats_debugfs_init(struct fnic *fnic)
 {
-	int rc = -1;
 	char name[16];
 
-	snprintf(name, sizeof(name), "host%d", fnic->lport->host->host_no);
+	if (IS_FNIC_FCP_INITIATOR(fnic))
+		snprintf(name, sizeof(name), "host%d", fnic->host->host_no);
+	else if (IS_FNIC_NVME_INITIATOR(fnic))
+		snprintf(name, sizeof(name), "nvfnic%d", fnic->fnic_num);
 
-	if (!fnic_stats_debugfs_root) {
-		printk(KERN_DEBUG "fnic_stats root doesn't exist\n");
-		return rc;
-	}
 	fnic->fnic_stats_debugfs_host = debugfs_create_dir(name,
 						fnic_stats_debugfs_root);
-	if (!fnic->fnic_stats_debugfs_host) {
-		printk(KERN_DEBUG "Cannot create host directory\n");
-		return rc;
-	}
-
 	fnic->fnic_stats_debugfs_file = debugfs_create_file("stats",
 						S_IFREG|S_IRUGO|S_IWUSR,
 						fnic->fnic_stats_debugfs_host,
 						fnic,
 						&fnic_stats_debugfs_fops);
-	if (!fnic->fnic_stats_debugfs_file) {
-		printk(KERN_DEBUG "Cannot create host stats file\n");
-		return rc;
-	}
-
 	fnic->fnic_reset_debugfs_file = debugfs_create_file("reset_stats",
 						S_IFREG|S_IRUGO|S_IWUSR,
 						fnic->fnic_stats_debugfs_host,
 						fnic,
 						&fnic_reset_debugfs_fops);
-	if (!fnic->fnic_reset_debugfs_file) {
-		printk(KERN_DEBUG "Cannot create host stats file\n");
-		return rc;
-	}
-	rc = 0;
-	return rc;
+	return 0;
 }
 
 /*
@@ -817,4 +743,76 @@ void fnic_stats_debugfs_remove(struct fnic *fnic)
 
 	debugfs_remove(fnic->fnic_stats_debugfs_host);
 	fnic->fnic_stats_debugfs_host = NULL;
+}
+
+void fnic_nvmef_debugfs_init(struct fnic *fnic)
+{
+	char name[16];
+
+	snprintf(name, sizeof(name), "host%d", fnic->fnic_num);
+
+	fnic->fnic_nvmef_debugfs_host = debugfs_create_dir(name,
+							   fnic_nvmef_debugfs_root);
+	fnic->fnic_nvmef_debugfs_file = debugfs_create_file("nvmef_info",
+							    S_IFREG | 0444,
+							    fnic->fnic_nvmef_debugfs_host,
+							    fnic,
+							    &fnic_nvmef_debugfs_fops);
+}
+
+static int fnic_nvmef_debugfs_open(struct inode *inode, struct file *file)
+{
+
+	struct fnic *fnic = inode->i_private;
+	struct fnic_nvmef_info *info;
+	int buf_size = 2 * PAGE_SIZE;
+
+	info = kzalloc_obj(struct fnic_nvmef_info);
+	if (!info)
+		return -ENOMEM;
+
+	info->info_buffer = vmalloc(buf_size);
+	if (!info->info_buffer) {
+		kfree(info);
+		return -ENOMEM;
+	}
+
+	info->buf_size = buf_size;
+	memset((void *)info->info_buffer, 0, buf_size);
+	info->buffer_len = nvfnic_get_nvmef_info(fnic, info);
+
+	file->private_data = info;
+
+	return 0;
+}
+
+static ssize_t fnic_nvmef_debugfs_read(struct file *file,
+				       char __user *ubuf,
+				       size_t nbytes, loff_t *pos)
+{
+	struct fnic_nvmef_info *info = file->private_data;
+
+	return simple_read_from_buffer(ubuf, nbytes, pos,
+				     info->info_buffer, info->buffer_len);
+}
+
+static int fnic_nvmef_debugfs_release(struct inode *inode, struct file *file)
+{
+	struct fnic_nvmef_info *info = file->private_data;
+
+	vfree(info->info_buffer);
+	kfree(info);
+	return 0;
+}
+
+void fnic_nvmef_debugfs_remove(struct fnic *fnic)
+{
+	if (!fnic)
+		return;
+
+	debugfs_remove(fnic->fnic_nvmef_debugfs_file);
+	fnic->fnic_nvmef_debugfs_file = NULL;
+
+	debugfs_remove(fnic->fnic_nvmef_debugfs_host);
+	fnic->fnic_nvmef_debugfs_host = NULL;
 }

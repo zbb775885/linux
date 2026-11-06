@@ -1,18 +1,15 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Memory copy functions for 32-bit PowerPC.
  *
  * Copyright (C) 1996-2005 Paul Mackerras.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
+#include <linux/export.h>
 #include <asm/processor.h>
 #include <asm/cache.h>
 #include <asm/errno.h>
 #include <asm/ppc_asm.h>
-#include <asm/export.h>
+#include <asm/code-patching-asm.h>
 
 #define COPY_16_BYTES		\
 	lwz	r7,4(r4);	\
@@ -59,14 +56,12 @@
 	EX_TABLE(8 ## n ## 7b,9 ## n ## 1b)
 
 	.text
-	.stabs	"arch/powerpc/lib/",N_SO,0,0,0f
-	.stabs	"copy_32.S",N_SO,0,0,0f
-0:
 
 CACHELINE_BYTES = L1_CACHE_BYTES
 LG_CACHELINE_BYTES = L1_CACHE_SHIFT
 CACHELINE_MASK = (L1_CACHE_BYTES-1)
 
+#ifndef CONFIG_KASAN
 _GLOBAL(memset16)
 	rlwinm.	r0 ,r5, 31, 1, 31
 	addi	r6, r3, -4
@@ -80,6 +75,7 @@ _GLOBAL(memset16)
 	sth	r4, 4(r6)
 	blr
 EXPORT_SYMBOL(memset16)
+#endif
 
 /*
  * Use dcbz on the complete cache lines in the destination
@@ -107,8 +103,8 @@ _GLOBAL(memset)
 	 * Skip optimised bloc until cache is enabled. Will be replaced
 	 * by 'bne' during boot to use normal procedure if r4 is not zero
 	 */
-_GLOBAL(memset_nocache_branch)
-	b	2f
+5:	b	2f
+	patch_site	5b, patch__memset_nocache
 
 	clrlwi	r7,r6,32-LG_CACHELINE_BYTES
 	add	r8,r7,r5
@@ -168,7 +164,9 @@ _GLOBAL(memmove)
 	/* fall through */
 
 _GLOBAL(memcpy)
-	b	generic_memcpy
+1:	b	generic_memcpy
+	patch_site	1b, patch__memcpy_nocache
+
 	add	r7,r3,r5		/* test if the src & dst overlap */
 	add	r8,r4,r5
 	cmplw	0,r4,r7

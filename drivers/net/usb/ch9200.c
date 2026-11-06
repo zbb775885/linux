@@ -111,8 +111,8 @@ static int control_read(struct usbnet *dev,
 		request_type = (USB_DIR_IN | USB_TYPE_VENDOR |
 				USB_RECIP_DEVICE);
 
-	netdev_dbg(dev->net, "Control_read() index=0x%02x size=%d\n",
-		   index, size);
+	netdev_dbg(dev->net, "%s() index=0x%02x size=%d\n",
+		   __func__, index, size);
 
 	buf = kmalloc(size, GFP_KERNEL);
 	if (!buf) {
@@ -129,8 +129,6 @@ static int control_read(struct usbnet *dev,
 	else if (err >= 0)
 		err = -EINVAL;
 	kfree(buf);
-
-	return err;
 
 err_out:
 	return err;
@@ -151,8 +149,8 @@ static int control_write(struct usbnet *dev, unsigned char request,
 		request_type = (USB_DIR_OUT | USB_TYPE_VENDOR |
 				USB_RECIP_DEVICE);
 
-	netdev_dbg(dev->net, "Control_write() index=0x%02x size=%d\n",
-		   index, size);
+	netdev_dbg(dev->net, "%s() index=0x%02x size=%d\n",
+		   __func__, index, size);
 
 	if (data) {
 		buf = kmemdup(data, size, GFP_KERNEL);
@@ -170,8 +168,6 @@ static int control_write(struct usbnet *dev, unsigned char request,
 		err = -EINVAL;
 	kfree(buf);
 
-	return 0;
-
 err_out:
 	return err;
 }
@@ -180,15 +176,18 @@ static int ch9200_mdio_read(struct net_device *netdev, int phy_id, int loc)
 {
 	struct usbnet *dev = netdev_priv(netdev);
 	unsigned char buff[2];
+	int ret;
 
-	netdev_dbg(netdev, "ch9200_mdio_read phy_id:%02x loc:%02x\n",
-		   phy_id, loc);
+	netdev_dbg(netdev, "%s phy_id:%02x loc:%02x\n",
+		   __func__, phy_id, loc);
 
 	if (phy_id != 0)
 		return -ENODEV;
 
-	control_read(dev, REQUEST_READ, 0, loc * 2, buff, 0x02,
-		     CONTROL_TIMEOUT_MS);
+	ret = control_read(dev, REQUEST_READ, 0, loc * 2, buff, 0x02,
+			   CONTROL_TIMEOUT_MS);
+	if (ret < 0)
+		return ret;
 
 	return (buff[0] | buff[1] << 8);
 }
@@ -199,8 +198,8 @@ static void ch9200_mdio_write(struct net_device *netdev,
 	struct usbnet *dev = netdev_priv(netdev);
 	unsigned char buff[2];
 
-	netdev_dbg(netdev, "ch9200_mdio_write() phy_id=%02x loc:%02x\n",
-		   phy_id, loc);
+	netdev_dbg(netdev, "%s() phy_id=%02x loc:%02x\n",
+		   __func__, phy_id, loc);
 
 	if (phy_id != 0)
 		return;
@@ -219,8 +218,8 @@ static int ch9200_link_reset(struct usbnet *dev)
 	mii_check_media(&dev->mii, 1, 1);
 	mii_ethtool_gset(&dev->mii, &ecmd);
 
-	netdev_dbg(dev->net, "link_reset() speed:%d duplex:%d\n",
-		   ecmd.speed, ecmd.duplex);
+	netdev_dbg(dev->net, "%s() speed:%d duplex:%d\n",
+		   __func__, ecmd.speed, ecmd.duplex);
 
 	return 0;
 }
@@ -309,7 +308,7 @@ static int get_mac_address(struct usbnet *dev, unsigned char *data)
 	unsigned char mac_addr[0x06];
 	int rd_mac_len = 0;
 
-	netdev_dbg(dev->net, "get_mac_address:\n\tusbnet VID:%0x PID:%0x\n",
+	netdev_dbg(dev->net, "%s:\n\tusbnet VID:%0x PID:%0x\n", __func__,
 		   le16_to_cpu(dev->udev->descriptor.idVendor),
 		   le16_to_cpu(dev->udev->descriptor.idProduct));
 
@@ -338,6 +337,7 @@ static int ch9200_bind(struct usbnet *dev, struct usb_interface *intf)
 {
 	int retval = 0;
 	unsigned char data[2];
+	u8 addr[ETH_ALEN];
 
 	retval = usbnet_get_endpoints(dev, intf);
 	if (retval)
@@ -358,34 +358,47 @@ static int ch9200_bind(struct usbnet *dev, struct usb_interface *intf)
 	data[1] = 0x0F;
 	retval = control_write(dev, REQUEST_WRITE, 0, MAC_REG_THRESHOLD, data,
 			       0x02, CONTROL_TIMEOUT_MS);
+	if (retval < 0)
+		return retval;
 
 	data[0] = 0xA0;
 	data[1] = 0x90;
 	retval = control_write(dev, REQUEST_WRITE, 0, MAC_REG_FIFO_DEPTH, data,
 			       0x02, CONTROL_TIMEOUT_MS);
+	if (retval < 0)
+		return retval;
 
 	data[0] = 0x30;
 	data[1] = 0x00;
 	retval = control_write(dev, REQUEST_WRITE, 0, MAC_REG_PAUSE, data,
 			       0x02, CONTROL_TIMEOUT_MS);
+	if (retval < 0)
+		return retval;
 
 	data[0] = 0x17;
 	data[1] = 0xD8;
 	retval = control_write(dev, REQUEST_WRITE, 0, MAC_REG_FLOW_CONTROL,
 			       data, 0x02, CONTROL_TIMEOUT_MS);
+	if (retval < 0)
+		return retval;
 
 	/* Undocumented register */
 	data[0] = 0x01;
 	data[1] = 0x00;
 	retval = control_write(dev, REQUEST_WRITE, 0, 254, data, 0x02,
 			       CONTROL_TIMEOUT_MS);
+	if (retval < 0)
+		return retval;
 
 	data[0] = 0x5F;
 	data[1] = 0x0D;
 	retval = control_write(dev, REQUEST_WRITE, 0, MAC_REG_CTRL, data, 0x02,
 			       CONTROL_TIMEOUT_MS);
+	if (retval < 0)
+		return retval;
 
-	retval = get_mac_address(dev, dev->net->dev_addr);
+	retval = get_mac_address(dev, addr);
+	eth_hw_addr_set(dev->net, addr);
 
 	return retval;
 }

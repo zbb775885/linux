@@ -15,12 +15,9 @@
  */
 
 #include <linux/signal.h>
+#include <linux/of.h>
 #include <linux/of_address.h>
-#include <linux/of_irq.h>
-#include <linux/of_platform.h>
-
-#include <asm/prom.h>
-
+#include <linux/platform_device.h>
 
 static int
 ohci_ppc_of_start(struct usb_hcd *hcd)
@@ -50,7 +47,7 @@ static const struct hc_driver ohci_ppc_of_hc_driver = {
 	 * generic hardware linkage
 	 */
 	.irq =			ohci_irq,
-	.flags =		HCD_USB11 | HCD_MEMORY,
+	.flags =		HCD_USB11 | HCD_DMA | HCD_MEMORY,
 
 	/*
 	 * basic lifecycle operations
@@ -89,7 +86,9 @@ static int ohci_hcd_ppc_of_probe(struct platform_device *op)
 	struct device_node *dn = op->dev.of_node;
 	struct usb_hcd *hcd;
 	struct ohci_hcd	*ohci;
-	struct resource res;
+	struct resource *res;
+	struct resource ehci_res;
+	void __iomem *regs;
 	int irq;
 
 	int rv;
@@ -105,30 +104,21 @@ static int ohci_hcd_ppc_of_probe(struct platform_device *op)
 
 	dev_dbg(&op->dev, "initializing PPC-OF USB Controller\n");
 
-	rv = of_address_to_resource(dn, 0, &res);
-	if (rv)
-		return rv;
+	regs = devm_platform_get_and_ioremap_resource(op, 0, &res);
+	if (IS_ERR(regs))
+		return PTR_ERR(regs);
+
+	irq = platform_get_irq(op, 0);
+	if (irq < 0)
+		return irq;
 
 	hcd = usb_create_hcd(&ohci_ppc_of_hc_driver, &op->dev, "PPC-OF USB");
 	if (!hcd)
 		return -ENOMEM;
 
-	hcd->rsrc_start = res.start;
-	hcd->rsrc_len = resource_size(&res);
-
-	hcd->regs = devm_ioremap_resource(&op->dev, &res);
-	if (IS_ERR(hcd->regs)) {
-		rv = PTR_ERR(hcd->regs);
-		goto err_rmr;
-	}
-
-	irq = irq_of_parse_and_map(dn, 0);
-	if (irq == NO_IRQ) {
-		dev_err(&op->dev, "%s: irq_of_parse_and_map failed\n",
-			__FILE__);
-		rv = -EBUSY;
-		goto err_rmr;
-	}
+	hcd->rsrc_start = res->start;
+	hcd->rsrc_len = resource_size(res);
+	hcd->regs = regs;
 
 	ohci = hcd_to_ohci(hcd);
 	if (is_bigendian) {
@@ -160,25 +150,24 @@ static int ohci_hcd_ppc_of_probe(struct platform_device *op)
 	* the ehci driver is loaded.
 	*/
 	if (np !=  NULL) {
-		if (!of_address_to_resource(np, 0, &res)) {
-			if (!request_mem_region(res.start, 0x4, hcd_name)) {
+		if (!of_address_to_resource(np, 0, &ehci_res)) {
+			if (!request_mem_region(ehci_res.start, 0x4, hcd_name)) {
 				writel_be((readl_be(&ohci->regs->control) |
 					OHCI_USB_SUSPEND), &ohci->regs->control);
 					(void) readl_be(&ohci->regs->control);
 			} else
-				release_mem_region(res.start, 0x4);
+				release_mem_region(ehci_res.start, 0x4);
 		} else
 			pr_debug("%s: cannot get ehci offset from fdt\n", __FILE__);
+		of_node_put(np);
 	}
 
-	irq_dispose_mapping(irq);
-err_rmr:
  	usb_put_hcd(hcd);
 
 	return rv;
 }
 
-static int ohci_hcd_ppc_of_remove(struct platform_device *op)
+static void ohci_hcd_ppc_of_remove(struct platform_device *op)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(op);
 
@@ -186,11 +175,7 @@ static int ohci_hcd_ppc_of_remove(struct platform_device *op)
 
 	usb_remove_hcd(hcd);
 
-	irq_dispose_mapping(hcd->irq);
-
 	usb_put_hcd(hcd);
-
-	return 0;
 }
 
 static const struct of_device_id ohci_hcd_ppc_of_match[] = {
@@ -205,10 +190,6 @@ static const struct of_device_id ohci_hcd_ppc_of_match[] = {
 	},
 #endif
 #ifdef CONFIG_USB_OHCI_HCD_PPC_OF_LE
-	{
-		.name = "usb",
-		.compatible = "ohci-littledian",
-	},
 	{
 		.name = "usb",
 		.compatible = "ohci-le",

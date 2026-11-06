@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * cpufreq driver for Enhanced SpeedStep, as found in Intel's Pentium
  * M (part of the Centrino chipset).
@@ -321,11 +322,11 @@ static unsigned extract_clock(unsigned msr, unsigned int cpu, int failsafe)
 /* Return the current CPU frequency in kHz */
 static unsigned int get_cur_freq(unsigned int cpu)
 {
-	unsigned l, h;
+	struct msr val;
 	unsigned clock_freq;
 
-	rdmsr_on_cpu(cpu, MSR_IA32_PERF_STATUS, &l, &h);
-	clock_freq = extract_clock(l, cpu, 0);
+	rdmsrq_on_cpu(cpu, MSR_IA32_PERF_STATUS, &val.q);
+	clock_freq = extract_clock(val.l, cpu, 0);
 
 	if (unlikely(clock_freq == 0)) {
 		/*
@@ -334,8 +335,8 @@ static unsigned int get_cur_freq(unsigned int cpu)
 		 * P-state transition (like TM2). Get the last freq set 
 		 * in PERF_CTL.
 		 */
-		rdmsr_on_cpu(cpu, MSR_IA32_PERF_CTL, &l, &h);
-		clock_freq = extract_clock(l, cpu, 1);
+		rdmsrq_on_cpu(cpu, MSR_IA32_PERF_CTL, &val.q);
+		clock_freq = extract_clock(val.l, cpu, 1);
 	}
 	return clock_freq;
 }
@@ -344,7 +345,7 @@ static unsigned int get_cur_freq(unsigned int cpu)
 static int centrino_cpu_init(struct cpufreq_policy *policy)
 {
 	struct cpuinfo_x86 *cpu = &cpu_data(policy->cpu);
-	unsigned l, h;
+	u64 q;
 	int i;
 
 	/* Only Intel makes Enhanced Speedstep-capable CPUs */
@@ -377,16 +378,16 @@ static int centrino_cpu_init(struct cpufreq_policy *policy)
 
 	/* Check to see if Enhanced SpeedStep is enabled, and try to
 	   enable it if not. */
-	rdmsr(MSR_IA32_MISC_ENABLE, l, h);
+	rdmsrq(MSR_IA32_MISC_ENABLE, q);
 
-	if (!(l & MSR_IA32_MISC_ENABLE_ENHANCED_SPEEDSTEP)) {
-		l |= MSR_IA32_MISC_ENABLE_ENHANCED_SPEEDSTEP;
-		pr_debug("trying to enable Enhanced SpeedStep (%x)\n", l);
-		wrmsr(MSR_IA32_MISC_ENABLE, l, h);
+	if (!(q & MSR_IA32_MISC_ENABLE_ENHANCED_SPEEDSTEP)) {
+		q |= MSR_IA32_MISC_ENABLE_ENHANCED_SPEEDSTEP;
+		pr_debug("trying to enable Enhanced SpeedStep (%x)\n", (u32)q);
+		wrmsrq(MSR_IA32_MISC_ENABLE, q);
 
 		/* check to see if it stuck */
-		rdmsr(MSR_IA32_MISC_ENABLE, l, h);
-		if (!(l & MSR_IA32_MISC_ENABLE_ENHANCED_SPEEDSTEP)) {
+		rdmsrq(MSR_IA32_MISC_ENABLE, q);
+		if (!(q & MSR_IA32_MISC_ENABLE_ENHANCED_SPEEDSTEP)) {
 			pr_info("couldn't enable Enhanced SpeedStep\n");
 			return -ENODEV;
 		}
@@ -394,25 +395,21 @@ static int centrino_cpu_init(struct cpufreq_policy *policy)
 
 	policy->cpuinfo.transition_latency = 10000;
 						/* 10uS transition latency */
-
-	return cpufreq_table_validate_and_show(policy,
-		per_cpu(centrino_model, policy->cpu)->op_points);
-}
-
-static int centrino_cpu_exit(struct cpufreq_policy *policy)
-{
-	unsigned int cpu = policy->cpu;
-
-	if (!per_cpu(centrino_model, cpu))
-		return -ENODEV;
-
-	per_cpu(centrino_model, cpu) = NULL;
+	policy->freq_table = per_cpu(centrino_model, policy->cpu)->op_points;
 
 	return 0;
 }
 
+static void centrino_cpu_exit(struct cpufreq_policy *policy)
+{
+	unsigned int cpu = policy->cpu;
+
+	if (per_cpu(centrino_model, cpu))
+		per_cpu(centrino_model, cpu) = NULL;
+}
+
 /**
- * centrino_setpolicy - set a new CPUFreq policy
+ * centrino_target - set a new CPUFreq policy
  * @policy: new policy
  * @index: index of target frequency
  *
@@ -420,7 +417,8 @@ static int centrino_cpu_exit(struct cpufreq_policy *policy)
  */
 static int centrino_target(struct cpufreq_policy *policy, unsigned int index)
 {
-	unsigned int	msr, oldmsr = 0, h = 0, cpu = policy->cpu;
+	unsigned int	msr, cpu = policy->cpu;
+	struct msr oldmsr = { .q = 0 };
 	int			retval = 0;
 	unsigned int		j, first_cpu;
 	struct cpufreq_frequency_table *op_points;
@@ -462,22 +460,22 @@ static int centrino_target(struct cpufreq_policy *policy, unsigned int index)
 		msr = op_points->driver_data;
 
 		if (first_cpu) {
-			rdmsr_on_cpu(good_cpu, MSR_IA32_PERF_CTL, &oldmsr, &h);
-			if (msr == (oldmsr & 0xffff)) {
+			rdmsrq_on_cpu(good_cpu, MSR_IA32_PERF_CTL, &oldmsr.q);
+			if (msr == (oldmsr.l & 0xffff)) {
 				pr_debug("no change needed - msr was and needs "
-					"to be %x\n", oldmsr);
+					"to be %x\n", oldmsr.l);
 				retval = 0;
 				goto out;
 			}
 
 			first_cpu = 0;
 			/* all but 16 LSB are reserved, treat them with care */
-			oldmsr &= ~0xffff;
+			oldmsr.l &= ~0xffff;
 			msr &= 0xffff;
-			oldmsr |= msr;
+			oldmsr.l |= msr;
 		}
 
-		wrmsr_on_cpu(good_cpu, MSR_IA32_PERF_CTL, oldmsr, h);
+		wrmsrq_on_cpu(good_cpu, MSR_IA32_PERF_CTL, oldmsr.q);
 		if (policy->shared_type == CPUFREQ_SHARED_TYPE_ANY)
 			break;
 
@@ -493,7 +491,7 @@ static int centrino_target(struct cpufreq_policy *policy, unsigned int index)
 		 */
 
 		for_each_cpu(j, covered_cpus)
-			wrmsr_on_cpu(j, MSR_IA32_PERF_CTL, oldmsr, h);
+			wrmsrq_on_cpu(j, MSR_IA32_PERF_CTL, oldmsr.q);
 	}
 	retval = 0;
 
@@ -510,7 +508,6 @@ static struct cpufreq_driver centrino_driver = {
 	.verify		= cpufreq_generic_frequency_table_verify,
 	.target_index	= centrino_target,
 	.get		= get_cur_freq,
-	.attr		= cpufreq_generic_attr,
 };
 
 /*
@@ -519,18 +516,12 @@ static struct cpufreq_driver centrino_driver = {
  * or ASCII model IDs.
  */
 static const struct x86_cpu_id centrino_ids[] = {
-	{ X86_VENDOR_INTEL, 6, 9, X86_FEATURE_EST },
-	{ X86_VENDOR_INTEL, 6, 13, X86_FEATURE_EST },
-	{ X86_VENDOR_INTEL, 6, 13, X86_FEATURE_EST },
-	{ X86_VENDOR_INTEL, 6, 13, X86_FEATURE_EST },
-	{ X86_VENDOR_INTEL, 15, 3, X86_FEATURE_EST },
-	{ X86_VENDOR_INTEL, 15, 4, X86_FEATURE_EST },
+	X86_MATCH_VFM_FEATURE(IFM( 6,  9), X86_FEATURE_EST, NULL),
+	X86_MATCH_VFM_FEATURE(IFM( 6, 13), X86_FEATURE_EST, NULL),
+	X86_MATCH_VFM_FEATURE(IFM(15,  3), X86_FEATURE_EST, NULL),
+	X86_MATCH_VFM_FEATURE(IFM(15,  4), X86_FEATURE_EST, NULL),
 	{}
 };
-#if 0
-/* Autoload or not? Do not for now. */
-MODULE_DEVICE_TABLE(x86cpu, centrino_ids);
-#endif
 
 /**
  * centrino_init - initializes the Enhanced SpeedStep CPUFreq driver

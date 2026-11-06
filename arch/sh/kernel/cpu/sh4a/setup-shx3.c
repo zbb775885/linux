@@ -1,22 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SH-X3 Prototype Setup
  *
  *  Copyright (C) 2007 - 2010  Paul Mundt
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/platform_device.h>
 #include <linux/init.h>
 #include <linux/serial.h>
 #include <linux/serial_sci.h>
 #include <linux/io.h>
-#include <linux/gpio.h>
+#include <linux/gpio/legacy.h>
 #include <linux/sh_timer.h>
 #include <linux/sh_intc.h>
 #include <cpu/shx3.h>
-#include <asm/mmzone.h>
+#include <asm/platform_early.h>
 
 /*
  * This intentionally only registers SCIF ports 0, 1, and 3. SCIF 2
@@ -155,7 +152,7 @@ arch_initcall(shx3_devices_setup);
 
 void __init plat_early_device_setup(void)
 {
-	early_platform_add_devices(shx3_early_devices,
+	sh_early_platform_add_devices(shx3_early_devices,
 				   ARRAY_SIZE(shx3_early_devices));
 }
 
@@ -378,21 +375,4 @@ void __init plat_irq_setup_pins(int mode)
 void __init plat_irq_setup(void)
 {
 	register_intc_controller(&intc_desc);
-}
-
-void __init plat_mem_setup(void)
-{
-	unsigned int nid = 1;
-
-	/* Register CPU#0 URAM space as Node 1 */
-	setup_bootmem_node(nid++, 0x145f0000, 0x14610000);	/* CPU0 */
-
-#if 0
-	/* XXX: Not yet.. */
-	setup_bootmem_node(nid++, 0x14df0000, 0x14e10000);	/* CPU1 */
-	setup_bootmem_node(nid++, 0x155f0000, 0x15610000);	/* CPU2 */
-	setup_bootmem_node(nid++, 0x15df0000, 0x15e10000);	/* CPU3 */
-#endif
-
-	setup_bootmem_node(nid++, 0x16000000, 0x16020000);	/* CSM */
 }

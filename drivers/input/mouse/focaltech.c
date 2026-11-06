@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Focaltech TouchPad PS/2 mouse driver
  *
  * Copyright (c) 2014 Red Hat Inc.
  * Copyright (c) 2014 Mathias Gottschlag <mgottschlag@gmail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Red Hat authors:
  *
@@ -82,8 +78,8 @@ struct focaltech_finger_state {
 	 * Absolute position (from the bottom left corner) of the
 	 * finger.
 	 */
-	unsigned int x;
-	unsigned int y;
+	int x;
+	int y;
 };
 
 /*
@@ -112,7 +108,7 @@ struct focaltech_hw_state {
 };
 
 struct focaltech_data {
-	unsigned int x_max, y_max;
+	int x_max, y_max;
 	struct focaltech_hw_state state;
 };
 
@@ -130,17 +126,16 @@ static void focaltech_report_state(struct psmouse *psmouse)
 		input_mt_slot(dev, i);
 		input_mt_report_slot_state(dev, MT_TOOL_FINGER, active);
 		if (active) {
-			unsigned int clamped_x, clamped_y;
 			/*
 			 * The touchpad might report invalid data, so we clamp
 			 * the resulting values so that we do not confuse
-			 * userspace.
+			 * userspace or accumulate coordinate wind-up.
 			 */
-			clamped_x = clamp(finger->x, 0U, priv->x_max);
-			clamped_y = clamp(finger->y, 0U, priv->y_max);
-			input_report_abs(dev, ABS_MT_POSITION_X, clamped_x);
+			finger->x = clamp(finger->x, 0, priv->x_max);
+			finger->y = clamp(finger->y, 0, priv->y_max);
+			input_report_abs(dev, ABS_MT_POSITION_X, finger->x);
 			input_report_abs(dev, ABS_MT_POSITION_Y,
-					 priv->y_max - clamped_y);
+					 priv->y_max - finger->y);
 			input_report_abs(dev, ABS_TOOL_WIDTH, state->width);
 		}
 	}
@@ -201,13 +196,13 @@ static void focaltech_process_rel_packet(struct psmouse *psmouse,
 {
 	struct focaltech_data *priv = psmouse->private;
 	struct focaltech_hw_state *state = &priv->state;
-	int finger1, finger2;
+	unsigned int finger1, finger2;
 
 	state->pressed = packet[0] >> 7;
 	finger1 = ((packet[0] >> 4) & 0x7) - 1;
 	if (finger1 < FOC_MAX_FINGERS) {
-		state->fingers[finger1].x += (char)packet[1];
-		state->fingers[finger1].y += (char)packet[2];
+		state->fingers[finger1].x += (s8)packet[1];
+		state->fingers[finger1].y += (s8)packet[2];
 	} else {
 		psmouse_err(psmouse, "First finger in rel packet invalid: %d\n",
 			    finger1);
@@ -222,8 +217,8 @@ static void focaltech_process_rel_packet(struct psmouse *psmouse,
 	 */
 	finger2 = ((packet[3] >> 4) & 0x7) - 1;
 	if (finger2 < FOC_MAX_FINGERS) {
-		state->fingers[finger2].x += (char)packet[4];
-		state->fingers[finger2].y += (char)packet[5];
+		state->fingers[finger2].x += (s8)packet[4];
+		state->fingers[finger2].y += (s8)packet[5];
 	}
 }
 
@@ -412,8 +407,7 @@ int focaltech_init(struct psmouse *psmouse)
 	struct focaltech_data *priv;
 	int error;
 
-	psmouse->private = priv = kzalloc(sizeof(struct focaltech_data),
-					  GFP_KERNEL);
+	psmouse->private = priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 

@@ -2,23 +2,25 @@ Kernel Memory Leak Detector
 ===========================
 
 Kmemleak provides a way of detecting possible kernel memory leaks in a
-way similar to a tracing garbage collector
-(https://en.wikipedia.org/wiki/Garbage_collection_%28computer_science%29#Tracing_garbage_collectors),
+way similar to a `tracing garbage collector
+<https://en.wikipedia.org/wiki/Tracing_garbage_collection>`_,
 with the difference that the orphan objects are not freed but only
 reported via /sys/kernel/debug/kmemleak. A similar method is used by the
 Valgrind tool (``memcheck --leak-check``) to detect the memory leaks in
 user-space applications.
-Kmemleak is supported on x86, arm, powerpc, sparc, sh, microblaze, ppc, mips, s390, metag and tile.
 
 Usage
 -----
 
 CONFIG_DEBUG_KMEMLEAK in "Kernel hacking" has to be enabled. A kernel
 thread scans the memory every 10 minutes (by default) and prints the
-number of new unreferenced objects found. To display the details of all
-the possible memory leaks::
+number of new unreferenced objects found. If the ``debugfs`` isn't already
+mounted, mount with::
 
   # mount -t debugfs nodev /sys/kernel/debug/
+
+To display the details of all the possible scanned memory leaks::
+
   # cat /sys/kernel/debug/kmemleak
 
 To trigger an intermediate memory scan::
@@ -64,13 +66,21 @@ Memory scanning parameters can be modified at run-time by writing to the
 Kmemleak can also be disabled at boot-time by passing ``kmemleak=off`` on
 the kernel command line.
 
-Memory may be allocated or freed before kmemleak is initialised and
-these actions are stored in an early log buffer. The size of this buffer
-is configured via the CONFIG_DEBUG_KMEMLEAK_EARLY_LOG_SIZE option.
+Memory may be allocated or freed before kmemleak is initialised, so a
+static pool of metadata objects is used to track those allocations. Once
+kmemleak is fully initialised the pool becomes an emergency reserve, used
+whenever a metadata object cannot be allocated from the slab. The number
+of objects in the pool is configured via the
+CONFIG_DEBUG_KMEMLEAK_MEM_POOL_SIZE option. Exhausting it at run time
+prints "Cannot allocate a kmemleak_object structure" and disables
+kmemleak.
 
 If CONFIG_DEBUG_KMEMLEAK_DEFAULT_OFF are enabled, the kmemleak is
 disabled by default. Passing ``kmemleak=on`` on the kernel command
 line enables the function. 
+
+If you are getting errors like "Error while writing to stdout" or "write_loop:
+Invalid argument", make sure kmemleak is properly enabled.
 
 Basic Algorithm
 ---------------
@@ -156,6 +166,7 @@ See the include/linux/kmemleak.h header for the functions prototype.
 - ``kmemleak_free_percpu``	 - notify of a percpu memory block freeing
 - ``kmemleak_update_trace``	 - update object allocation stack trace
 - ``kmemleak_not_leak``	 - mark an object as not a leak
+- ``kmemleak_transient_leak``	 - mark an object as a transient leak
 - ``kmemleak_ignore``		 - do not scan or report an object as leak
 - ``kmemleak_scan_area``	 - add scan areas inside a memory block
 - ``kmemleak_no_scan``	 - do not scan a memory block
@@ -169,7 +180,6 @@ mapping:
 
 - ``kmemleak_alloc_phys``
 - ``kmemleak_free_part_phys``
-- ``kmemleak_not_leak_phys``
 - ``kmemleak_ignore_phys``
 
 Dealing with false positives/negatives
@@ -180,7 +190,8 @@ reported by kmemleak because values found during the memory scanning
 point to such objects. To reduce the number of false negatives, kmemleak
 provides the kmemleak_ignore, kmemleak_scan_area, kmemleak_no_scan and
 kmemleak_erase functions (see above). The task stacks also increase the
-amount of false negatives and their scanning is not enabled by default.
+amount of false negatives and their scanning is enabled by default; it
+can be turned off with ``stack=off``.
 
 The false positives are objects wrongly reported as being memory leaks
 (orphan). For objects known not to be leaks, kmemleak provides the
@@ -190,15 +201,27 @@ longer be scanned.
 
 Some of the reported leaks are only transient, especially on SMP
 systems, because of pointers temporarily stored in CPU registers or
-stacks. Kmemleak defines MSECS_MIN_AGE (defaulting to 1000) representing
+stacks. Kmemleak defines MSECS_MIN_AGE (defaulting to 5000) representing
 the minimum age of an object to be reported as a memory leak.
+
+The ``min_unref_scans`` module parameter requires an object to be seen
+unreferenced in that many consecutive scans before it is reported. It
+defaults to 3 when CONFIG_DEBUG_KMEMLEAK_VERBOSE is enabled, where the
+periodic scan thread confirms a leak on its own, and to 1 otherwise. A
+value of 1 preserves the historical behaviour; higher values filter the
+transient false positives described above, at the cost of delaying genuine
+reports by up to that many scans. It can be set at boot with
+``kmemleak.min_unref_scans=<n>`` or at run-time via
+``/sys/module/kmemleak/parameters/min_unref_scans``.
 
 Limitations and Drawbacks
 -------------------------
 
 The main drawback is the reduced performance of memory allocation and
-freeing. To avoid other penalties, the memory scanning is only performed
-when the /sys/kernel/debug/kmemleak file is read. Anyway, this tool is
+freeing. To avoid other penalties, the memory scanning is performed by a
+periodic thread rather than on every allocation. Reading the
+/sys/kernel/debug/kmemleak file only lists the objects found by the last
+scan; writing ``scan`` to it triggers a new one. Anyway, this tool is
 intended for debugging purposes where the performance might not be the
 most important requirement.
 
@@ -218,3 +241,37 @@ the pointer is calculated by other methods than the usual container_of
 macro or the pointer is stored in a location not scanned by kmemleak.
 
 Page allocations and ioremap are not tracked.
+
+Testing with kmemleak-test
+--------------------------
+
+To check if you have all set up to use kmemleak, you can use the kmemleak-test
+module, a module that deliberately leaks memory. Set CONFIG_SAMPLE_KMEMLEAK
+as module (it can't be used as built-in) and boot the kernel with kmemleak
+enabled. Load the module and perform a scan with::
+
+        # modprobe kmemleak-test
+        # echo scan > /sys/kernel/debug/kmemleak
+
+Note that the you may not get results instantly or on the first scanning. When
+kmemleak gets results, it'll log ``kmemleak: <count of leaks> new suspected
+memory leaks``. Then read the file to see then::
+
+        # cat /sys/kernel/debug/kmemleak
+        unreferenced object 0xffff89862ca702e8 (size 32):
+          comm "modprobe", pid 2088, jiffies 4294680594 (age 375.486s)
+          hex dump (first 32 bytes):
+            6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b  kkkkkkkkkkkkkkkk
+            6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b 6b a5  kkkkkkkkkkkkkkk.
+          backtrace:
+            [<00000000e0a73ec7>] 0xffffffffc01d2036
+            [<000000000c5d2a46>] do_one_initcall+0x41/0x1df
+            [<0000000046db7e0a>] do_init_module+0x55/0x200
+            [<00000000542b9814>] load_module+0x203c/0x2480
+            [<00000000c2850256>] __do_sys_finit_module+0xba/0xe0
+            [<000000006564e7ef>] do_syscall_64+0x43/0x110
+            [<000000007c873fa6>] entry_SYSCALL_64_after_hwframe+0x44/0xa9
+        ...
+
+Removing the module with ``rmmod kmemleak_test`` should also trigger some
+kmemleak results.

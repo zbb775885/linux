@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
 
   Broadcom B43 wireless driver
@@ -6,20 +7,6 @@
 
   Copyright (c) 2005-2007 Michael Buesch <m@bues.ch>
 
-  This program is free software; you can redistribute it and/or modify
-  it under the terms of the GNU General Public License as published by
-  the Free Software Foundation; either version 2 of the License, or
-  (at your option) any later version.
-
-  This program is distributed in the hope that it will be useful,
-  but WITHOUT ANY WARRANTY; without even the implied warranty of
-  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-  GNU General Public License for more details.
-
-  You should have received a copy of the GNU General Public License
-  along with this program; see the file COPYING.  If not, write to
-  the Free Software Foundation, Inc., 51 Franklin Steet, Fifth Floor,
-  Boston, MA 02110-1301, USA.
 
 */
 
@@ -43,7 +30,6 @@ static struct dentry *rootdir;
 struct b43_debugfs_fops {
 	ssize_t (*read)(struct b43_wldev *dev, char *buf, size_t bufsize);
 	int (*write)(struct b43_wldev *dev, const char *buf, size_t count);
-	struct file_operations fops;
 	/* Offset of struct b43_dfs_file in struct b43_dfsentry */
 	size_t file_struct_offset;
 };
@@ -64,7 +50,7 @@ struct b43_dfs_file *fops_to_dfs_file(struct b43_wldev *dev,
 #define fappend(fmt, x...)	\
 	do {							\
 		if (bufsize - count)				\
-			count += snprintf(buf + count,		\
+			count += scnprintf(buf + count,		\
 					  bufsize - count,	\
 					  fmt , ##x);		\
 		else						\
@@ -504,12 +490,11 @@ static ssize_t b43_debugfs_read(struct file *file, char __user *userbuf,
 				size_t count, loff_t *ppos)
 {
 	struct b43_wldev *dev;
-	struct b43_debugfs_fops *dfops;
+	const struct b43_debugfs_fops *dfops;
 	struct b43_dfs_file *dfile;
-	ssize_t uninitialized_var(ret);
+	ssize_t ret;
 	char *buf;
 	const size_t bufsize = 1024 * 16; /* 16 kiB buffer */
-	const size_t buforder = get_order(bufsize);
 	int err = 0;
 
 	if (!count)
@@ -524,8 +509,7 @@ static ssize_t b43_debugfs_read(struct file *file, char __user *userbuf,
 		goto out_unlock;
 	}
 
-	dfops = container_of(debugfs_real_fops(file),
-			     struct b43_debugfs_fops, fops);
+	dfops = debugfs_get_aux(file);
 	if (!dfops->read) {
 		err = -ENOSYS;
 		goto out_unlock;
@@ -533,15 +517,14 @@ static ssize_t b43_debugfs_read(struct file *file, char __user *userbuf,
 	dfile = fops_to_dfs_file(dev, dfops);
 
 	if (!dfile->buffer) {
-		buf = (char *)__get_free_pages(GFP_KERNEL, buforder);
+		buf = kzalloc(bufsize, GFP_KERNEL);
 		if (!buf) {
 			err = -ENOMEM;
 			goto out_unlock;
 		}
-		memset(buf, 0, bufsize);
 		ret = dfops->read(dev, buf, bufsize);
 		if (ret <= 0) {
-			free_pages((unsigned long)buf, buforder);
+			kfree(buf);
 			err = ret;
 			goto out_unlock;
 		}
@@ -553,7 +536,7 @@ static ssize_t b43_debugfs_read(struct file *file, char __user *userbuf,
 				      dfile->buffer,
 				      dfile->data_len);
 	if (*ppos >= dfile->data_len) {
-		free_pages((unsigned long)dfile->buffer, buforder);
+		kfree(dfile->buffer);
 		dfile->buffer = NULL;
 		dfile->data_len = 0;
 	}
@@ -568,13 +551,13 @@ static ssize_t b43_debugfs_write(struct file *file,
 				 size_t count, loff_t *ppos)
 {
 	struct b43_wldev *dev;
-	struct b43_debugfs_fops *dfops;
+	const struct b43_debugfs_fops *dfops;
 	char *buf;
 	int err = 0;
 
 	if (!count)
 		return 0;
-	if (count > PAGE_SIZE)
+	if (count >= PAGE_SIZE)
 		return -E2BIG;
 	dev = file->private_data;
 	if (!dev)
@@ -586,14 +569,13 @@ static ssize_t b43_debugfs_write(struct file *file,
 		goto out_unlock;
 	}
 
-	dfops = container_of(debugfs_real_fops(file),
-			     struct b43_debugfs_fops, fops);
+	dfops = debugfs_get_aux(file);
 	if (!dfops->write) {
 		err = -ENOSYS;
 		goto out_unlock;
 	}
 
-	buf = (char *)get_zeroed_page(GFP_KERNEL);
+	buf = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!buf) {
 		err = -ENOMEM;
 		goto out_unlock;
@@ -607,7 +589,7 @@ static ssize_t b43_debugfs_write(struct file *file,
 		goto out_freepage;
 
 out_freepage:
-	free_page((unsigned long)buf);
+	kfree(buf);
 out_unlock:
 	mutex_unlock(&dev->wl->mutex);
 
@@ -615,16 +597,16 @@ out_unlock:
 }
 
 
+static struct debugfs_short_fops debugfs_ops = {
+	.read	= b43_debugfs_read,
+	.write	= b43_debugfs_write,
+	.llseek = generic_file_llseek,
+};
+
 #define B43_DEBUGFS_FOPS(name, _read, _write)			\
 	static struct b43_debugfs_fops fops_##name = {		\
 		.read	= _read,				\
 		.write	= _write,				\
-		.fops	= {					\
-			.open	= simple_open,			\
-			.read	= b43_debugfs_read,		\
-			.write	= b43_debugfs_write,		\
-			.llseek = generic_file_llseek,		\
-		},						\
 		.file_struct_offset = offsetof(struct b43_dfsentry, \
 					       file_##name),	\
 	}
@@ -656,27 +638,15 @@ bool b43_debug(struct b43_wldev *dev, enum b43_dyndbg feature)
 	return enabled;
 }
 
-static void b43_remove_dynamic_debug(struct b43_wldev *dev)
-{
-	struct b43_dfsentry *e = dev->dfsentry;
-	int i;
-
-	for (i = 0; i < __B43_NR_DYNDBG; i++)
-		debugfs_remove(e->dyn_debug_dentries[i]);
-}
-
 static void b43_add_dynamic_debug(struct b43_wldev *dev)
 {
 	struct b43_dfsentry *e = dev->dfsentry;
-	struct dentry *d;
 
-#define add_dyn_dbg(name, id, initstate) do {		\
-	e->dyn_debug[id] = (initstate);			\
-	d = debugfs_create_bool(name, 0600, e->subdir,	\
-				&(e->dyn_debug[id]));	\
-	if (!IS_ERR(d))					\
-		e->dyn_debug_dentries[id] = d;		\
-				} while (0)
+#define add_dyn_dbg(name, id, initstate) do {			\
+	e->dyn_debug[id] = (initstate);				\
+	debugfs_create_bool(name, 0600, e->subdir,		\
+			    &(e->dyn_debug[id]));		\
+	} while (0)
 
 	add_dyn_dbg("debug_xmitpower", B43_DBG_XMITPOWER, false);
 	add_dyn_dbg("debug_dmaoverflow", B43_DBG_DMAOVERFLOW, false);
@@ -698,15 +668,14 @@ void b43_debugfs_add_device(struct b43_wldev *dev)
 	char devdir[16];
 
 	B43_WARN_ON(!dev);
-	e = kzalloc(sizeof(*e), GFP_KERNEL);
+	e = kzalloc_obj(*e);
 	if (!e) {
 		b43err(dev->wl, "debugfs: add device OOM\n");
 		return;
 	}
 	e->dev = dev;
 	log = &e->txstatlog;
-	log->log = kcalloc(B43_NR_LOGGED_TXSTATUS,
-			   sizeof(struct b43_txstatus), GFP_KERNEL);
+	log->log = kzalloc_objs(struct b43_txstatus, B43_NR_LOGGED_TXSTATUS);
 	if (!log->log) {
 		b43err(dev->wl, "debugfs: add device txstatus OOM\n");
 		kfree(e);
@@ -718,19 +687,6 @@ void b43_debugfs_add_device(struct b43_wldev *dev)
 
 	snprintf(devdir, sizeof(devdir), "%s", wiphy_name(dev->wl->hw->wiphy));
 	e->subdir = debugfs_create_dir(devdir, rootdir);
-	if (!e->subdir || IS_ERR(e->subdir)) {
-		if (e->subdir == ERR_PTR(-ENODEV)) {
-			b43dbg(dev->wl, "DebugFS (CONFIG_DEBUG_FS) not "
-			       "enabled in kernel config\n");
-		} else {
-			b43err(dev->wl, "debugfs: cannot create %s directory\n",
-			       devdir);
-		}
-		dev->dfsentry = NULL;
-		kfree(log->log);
-		kfree(e);
-		return;
-	}
 
 	e->mmio16read_next = 0xFFFF; /* invalid address */
 	e->mmio32read_next = 0xFFFF; /* invalid address */
@@ -741,13 +697,9 @@ void b43_debugfs_add_device(struct b43_wldev *dev)
 
 #define ADD_FILE(name, mode)	\
 	do {							\
-		struct dentry *d;				\
-		d = debugfs_create_file(__stringify(name),	\
-					mode, e->subdir, dev,	\
-					&fops_##name.fops);	\
-		e->file_##name.dentry = NULL;			\
-		if (!IS_ERR(d))					\
-			e->file_##name.dentry = d;		\
+		debugfs_create_file_aux(__stringify(name),	\
+				mode, e->subdir, dev,		\
+				&fops_##name, &debugfs_ops);	\
 	} while (0)
 
 
@@ -777,19 +729,6 @@ void b43_debugfs_remove_device(struct b43_wldev *dev)
 	e = dev->dfsentry;
 	if (!e)
 		return;
-	b43_remove_dynamic_debug(dev);
-
-	debugfs_remove(e->file_shm16read.dentry);
-	debugfs_remove(e->file_shm16write.dentry);
-	debugfs_remove(e->file_shm32read.dentry);
-	debugfs_remove(e->file_shm32write.dentry);
-	debugfs_remove(e->file_mmio16read.dentry);
-	debugfs_remove(e->file_mmio16write.dentry);
-	debugfs_remove(e->file_mmio32read.dentry);
-	debugfs_remove(e->file_mmio32write.dentry);
-	debugfs_remove(e->file_txstat.dentry);
-	debugfs_remove(e->file_restart.dentry);
-	debugfs_remove(e->file_loctls.dentry);
 
 	debugfs_remove(e->subdir);
 	kfree(e->txstatlog.log);
@@ -818,8 +757,6 @@ void b43_debugfs_log_txstat(struct b43_wldev *dev,
 void b43_debugfs_init(void)
 {
 	rootdir = debugfs_create_dir(KBUILD_MODNAME, NULL);
-	if (IS_ERR(rootdir))
-		rootdir = NULL;
 }
 
 void b43_debugfs_exit(void)

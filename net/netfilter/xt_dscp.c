@@ -1,10 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* IP tables module for matching the value of the IPv4/IPv6 DSCP field
  *
  * (C) 2002 by Harald Welte <laforge@netfilter.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
@@ -52,6 +49,16 @@ static int dscp_mt_check(const struct xt_mtchk_param *par)
 	return 0;
 }
 
+static int tos_mt_check(const struct xt_mtchk_param *par)
+{
+	const struct xt_tos_match_info *info = par->matchinfo;
+
+	if (info->invert > 1)
+		return -EINVAL;
+
+	return 0;
+}
+
 static bool tos_mt(const struct sk_buff *skb, struct xt_action_param *par)
 {
 	const struct xt_tos_match_info *info = par->matchinfo;
@@ -85,6 +92,7 @@ static struct xt_match dscp_mt_reg[] __read_mostly = {
 		.name		= "tos",
 		.revision	= 1,
 		.family		= NFPROTO_IPV4,
+		.checkentry	= tos_mt_check,
 		.match		= tos_mt,
 		.matchsize	= sizeof(struct xt_tos_match_info),
 		.me		= THIS_MODULE,
@@ -93,6 +101,7 @@ static struct xt_match dscp_mt_reg[] __read_mostly = {
 		.name		= "tos",
 		.revision	= 1,
 		.family		= NFPROTO_IPV6,
+		.checkentry	= tos_mt_check,
 		.match		= tos_mt,
 		.matchsize	= sizeof(struct xt_tos_match_info),
 		.me		= THIS_MODULE,

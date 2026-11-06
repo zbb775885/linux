@@ -237,10 +237,10 @@ static void print_opcode(struct insn *insn, int nr)
 		opcode += 2;
 	printf("\t[%4d] = { .opfrag = 0x%s, .format = INSTR_%s, ", nr, opcode, insn->format);
 	if (insn->name_len < 6)
-		printf(".name = \"%s\" ", insn->name);
+		printf(".name = \"%s\"", insn->name);
 	else
-		printf(".offset = LONG_INSN_%s ", insn->upper);
-	printf("}, \\\n");
+		printf(".offset = LONG_INSN_%s", insn->upper);
+	printf(" }, \\\n");
 }
 
 static void add_to_group(struct gen_opcode *desc, struct insn *insn, int offset)
@@ -257,7 +257,7 @@ static void add_to_group(struct gen_opcode *desc, struct insn *insn, int offset)
 	if (!desc->group)
 		exit(EXIT_FAILURE);
 	group = &desc->group[desc->nr_groups - 1];
-	strncpy(group->opcode, insn->opcode, 2);
+	memcpy(group->opcode, insn->opcode, 2);
 	group->type = insn->type;
 	group->offset = offset;
 	group->count = 1;
@@ -283,7 +283,7 @@ static void print_opcode_table(struct gen_opcode *desc)
 			continue;
 		add_to_group(desc, insn, offset);
 		if (strncmp(opcode, insn->opcode, 2)) {
-			strncpy(opcode, insn->opcode, 2);
+			memcpy(opcode, insn->opcode, 2);
 			printf("\t/* %.2s */ \\\n", opcode);
 		}
 		print_opcode(insn, offset);

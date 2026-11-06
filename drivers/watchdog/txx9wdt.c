@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * txx9wdt: A Hardware Watchdog Driver for TXx9 SoCs
  *
  * Copyright (C) 2007 Atsushi Nemoto <anemo@mba.ocn.ne.jp>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -19,6 +16,7 @@
 #include <linux/clk.h>
 #include <linux/err.h>
 #include <linux/io.h>
+#include <linux/stringify.h>
 #include <asm/txx9tmr.h>
 
 #define WD_TIMER_CCD	7		/* 1/256 */
@@ -30,14 +28,14 @@ static unsigned int timeout = TIMER_MARGIN;	/* in seconds */
 module_param(timeout, uint, 0);
 MODULE_PARM_DESC(timeout,
 	"Watchdog timeout in seconds. "
-	"(0<timeout<((2^" __MODULE_STRING(TXX9_TIMER_BITS) ")/(IMCLK/256)), "
-	"default=" __MODULE_STRING(TIMER_MARGIN) ")");
+	"(0<timeout<((2^" __stringify(TXX9_TIMER_BITS) ")/(IMCLK/256)), "
+	"default=" __stringify(TIMER_MARGIN) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 	"Watchdog cannot be stopped once started "
-	"(default=" __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	"(default=" __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static struct txx9_tmr_reg __iomem *txx9wdt_reg;
 static struct clk *txx9_imclk;
@@ -101,9 +99,8 @@ static struct watchdog_device txx9wdt = {
 	.ops = &txx9wdt_ops,
 };
 
-static int __init txx9wdt_probe(struct platform_device *dev)
+static int txx9wdt_probe(struct platform_device *dev)
 {
-	struct resource *res;
 	int ret;
 
 	txx9_imclk = clk_get(NULL, "imbus_clk");
@@ -119,8 +116,7 @@ static int __init txx9wdt_probe(struct platform_device *dev)
 		goto exit;
 	}
 
-	res = platform_get_resource(dev, IORESOURCE_MEM, 0);
-	txx9wdt_reg = devm_ioremap_resource(&dev->dev, res);
+	txx9wdt_reg = devm_platform_ioremap_resource(dev, 0);
 	if (IS_ERR(txx9wdt_reg)) {
 		ret = PTR_ERR(txx9wdt_reg);
 		goto exit;
@@ -150,12 +146,11 @@ exit:
 	return ret;
 }
 
-static int __exit txx9wdt_remove(struct platform_device *dev)
+static void txx9wdt_remove(struct platform_device *dev)
 {
 	watchdog_unregister_device(&txx9wdt);
 	clk_disable_unprepare(txx9_imclk);
 	clk_put(txx9_imclk);
-	return 0;
 }
 
 static void txx9wdt_shutdown(struct platform_device *dev)
@@ -164,14 +159,14 @@ static void txx9wdt_shutdown(struct platform_device *dev)
 }
 
 static struct platform_driver txx9wdt_driver = {
-	.remove = __exit_p(txx9wdt_remove),
+	.probe = txx9wdt_probe,
+	.remove = txx9wdt_remove,
 	.shutdown = txx9wdt_shutdown,
 	.driver = {
 		.name = "txx9wdt",
 	},
 };
-
-module_platform_driver_probe(txx9wdt_driver, txx9wdt_probe);
+module_platform_driver(txx9wdt_driver);
 
 MODULE_DESCRIPTION("TXx9 Watchdog Driver");
 MODULE_LICENSE("GPL");

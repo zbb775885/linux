@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  mxl111sf-i2c.c - driver for the MaxLinear MXL111SF
  *
  *  Copyright (C) 2010-2014 Michael Krufky <mkrufky@linuxtv.org>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  */
 
 #include "mxl111sf-i2c.h"
@@ -764,7 +755,7 @@ exit:
 	buf[0] = USB_WRITE_I2C_CMD;
 	buf[1] = 0x00;
 
-	/* de-initilize I2C BUS */
+	/* de-initialize I2C BUS */
 	buf[5] = USB_END_I2C_CMD;
 	mxl111sf_i2c_send_data(state, 0, buf);
 
@@ -778,7 +769,7 @@ exit:
 	buf[6] = 0x00;
 	buf[7] = 0x00;
 
-	/* de-initilize I2C BUS */
+	/* de-initialize I2C BUS */
 	buf[8] = USB_END_I2C_CMD;
 	mxl111sf_i2c_send_data(state, 0, buf);
 

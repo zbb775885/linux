@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * FB driver for the uPD161704 LCD Controller
+ * FB driver for the BD663474 LCD Controller
  *
  * Copyright (C) 2014 Seong-Woo Kim
  *
@@ -12,7 +12,6 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/gpio.h>
 #include <linux/delay.h>
 
 #include "fbtft.h"
@@ -24,9 +23,6 @@
 
 static int init_display(struct fbtft_par *par)
 {
-	if (par->gpio.cs != -1)
-		gpio_set_value(par->gpio.cs, 0);  /* Activate chip */
-
 	par->fbtftops.reset(par);
 
 	/* Initialization sequence from Lib_UTFT */
@@ -170,6 +166,6 @@ MODULE_ALIAS("platform:" DRVNAME);
 MODULE_ALIAS("spi:bd663474");
 MODULE_ALIAS("platform:bd663474");
 
-MODULE_DESCRIPTION("FB driver for the uPD161704 LCD Controller");
+MODULE_DESCRIPTION("FB driver for the BD663474 LCD Controller");
 MODULE_AUTHOR("Seong-Woo Kim");
 MODULE_LICENSE("GPL");

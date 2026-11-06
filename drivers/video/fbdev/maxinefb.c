@@ -61,7 +61,7 @@ static struct fb_fix_screeninfo maxinefb_fix __initdata = {
 
 /* Handle the funny Inmos RamDAC/video controller ... */
 
-void maxinefb_ims332_write_register(int regno, register unsigned int val)
+static void maxinefb_ims332_write_register(int regno, register unsigned int val)
 {
 	register unsigned char *regs = (char *) MAXINEFB_IMS332_ADDRESS;
 	unsigned char *wptr;
@@ -71,7 +71,9 @@ void maxinefb_ims332_write_register(int regno, register unsigned int val)
 	*((volatile unsigned short *) (wptr)) = val;
 }
 
-unsigned int maxinefb_ims332_read_register(int regno)
+#if 0
+/* dead code: leave here for hardware interface documentation */
+static unsigned int maxinefb_ims332_read_register(int regno)
 {
 	register unsigned char *regs = (char *) MAXINEFB_IMS332_ADDRESS;
 	unsigned char *rptr;
@@ -83,6 +85,7 @@ unsigned int maxinefb_ims332_read_register(int regno)
 
 	return (j & 0xffff) | ((k & 0xff00) << 8);
 }
+#endif
 
 /* Set the palette */
 static int maxinefb_setcolreg(unsigned regno, unsigned red, unsigned green,
@@ -95,7 +98,7 @@ static int maxinefb_setcolreg(unsigned regno, unsigned red, unsigned green,
 		return 1;
 
 	red   >>= 8;    /* The cmap fields are 16 bits    */
-	green >>= 8;    /* wide, but the harware colormap */
+	green >>= 8;    /* wide, but the hardware colormap */
 	blue  >>= 8;    /* registers are only 8 bits wide */
 
 	hw_colorvalue = (blue << 16) + (green << 8) + (red);
@@ -105,15 +108,13 @@ static int maxinefb_setcolreg(unsigned regno, unsigned red, unsigned green,
 	return 0;
 }
 
-static struct fb_ops maxinefb_ops = {
+static const struct fb_ops maxinefb_ops = {
 	.owner		= THIS_MODULE,
+	FB_DEFAULT_IOMEM_OPS,
 	.fb_setcolreg	= maxinefb_setcolreg,
-	.fb_fillrect	= cfb_fillrect,
-	.fb_copyarea	= cfb_copyarea,
-	.fb_imageblit	= cfb_imageblit,
 };
 
-int __init maxinefb_init(void)
+static int __init maxinefb_init(void)
 {
 	unsigned long fboff;
 	unsigned long fb_start;
@@ -138,7 +139,7 @@ int __init maxinefb_init(void)
 		*(volatile unsigned char *)fboff = 0x0;
 
 	maxinefb_fix.smem_start = fb_start;
-	
+
 	/* erase hardware cursor */
 	for (i = 0; i < 512; i++) {
 		maxinefb_ims332_write_register(IMS332_REG_CURSOR_RAM + i,
@@ -155,12 +156,11 @@ int __init maxinefb_init(void)
 	fb_info.screen_base = (char *)maxinefb_fix.smem_start;
 	fb_info.var = maxinefb_defined;
 	fb_info.fix = maxinefb_fix;
-	fb_info.flags = FBINFO_DEFAULT;
 
 	fb_alloc_cmap(&fb_info.cmap, 256, 0);
 
 	if (register_framebuffer(&fb_info) < 0)
-		return 1;
+		return -ENODEV;
 	return 0;
 }
 
@@ -169,9 +169,7 @@ static void __exit maxinefb_exit(void)
 	unregister_framebuffer(&fb_info);
 }
 
-#ifdef MODULE
-MODULE_LICENSE("GPL");
-#endif
 module_init(maxinefb_init);
 module_exit(maxinefb_exit);
 
+MODULE_LICENSE("GPL");

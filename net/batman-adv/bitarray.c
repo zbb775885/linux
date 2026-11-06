@@ -1,19 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Copyright (C) 2006-2017  B.A.T.M.A.N. contributors:
+/* Copyright (C) B.A.T.M.A.N. contributors:
  *
  * Simon Wunderlich, Marek Lindner
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of version 2 of the GNU General Public
- * License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "bitarray.h"
@@ -23,7 +11,14 @@
 
 #include "log.h"
 
-/* shift the packet array by n places. */
+/**
+ * batadv_bitmap_shift_left() - shift the sequence number bitmap left
+ * @seq_bits: the sequence number bitmap to shift
+ * @n: number of positions to shift left
+ *
+ * Shift @seq_bits by @n positions. No-op if @n is not within the bounds of
+ * the bitmap.
+ */
 static void batadv_bitmap_shift_left(unsigned long *seq_bits, s32 n)
 {
 	if (n <= 0 || n >= BATADV_TQ_LOCAL_WINDOW_SIZE)
@@ -35,8 +30,8 @@ static void batadv_bitmap_shift_left(unsigned long *seq_bits, s32 n)
 /**
  * batadv_bit_get_packet() - receive and process one packet within the sequence
  *  number window
- * @priv: the bat priv with all the soft interface information
- * @seq_bits: pointer to the sequence number receive packet
+ * @priv: the bat priv with all the mesh interface information
+ * @seq_bits: pointer to the sequence number bitmap of received packets
  * @seq_num_diff: difference between the current/received sequence number and
  *  the last sequence number
  * @set_mark: whether this packet should be marked in seq_bits

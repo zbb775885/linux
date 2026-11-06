@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * ALSA SoC SPDIF In Audio Layer for spear processors
  *
  * Copyright (C) 2012 ST Microelectronics
  * Vipin Kumar <vipin.kumar@st.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/clk.h>
@@ -58,7 +55,7 @@ static int spdif_in_dai_probe(struct snd_soc_dai *dai)
 	struct spdif_in_dev *host = snd_soc_dai_get_drvdata(dai);
 
 	host->dma_params_rx.filter_data = &host->dma_params;
-	dai->capture_dma_data = &host->dma_params_rx;
+	snd_soc_dai_dma_data_set_capture(dai, &host->dma_params_rx);
 
 	return 0;
 }
@@ -153,12 +150,12 @@ static int spdif_in_trigger(struct snd_pcm_substream *substream, int cmd,
 
 static const struct snd_soc_dai_ops spdif_in_dai_ops = {
 	.shutdown	= spdif_in_shutdown,
+	.probe = spdif_in_dai_probe,
 	.trigger	= spdif_in_trigger,
 	.hw_params	= spdif_in_hw_params,
 };
 
 static struct snd_soc_dai_driver spdif_in_dai = {
-	.probe = spdif_in_dai_probe,
 	.capture = {
 		.channels_min = 2,
 		.channels_max = 2,
@@ -172,7 +169,8 @@ static struct snd_soc_dai_driver spdif_in_dai = {
 };
 
 static const struct snd_soc_component_driver spdif_in_component = {
-	.name		= "spdif-in",
+	.name			= "spdif-in",
+	.legacy_dai_naming	= 1,
 };
 
 static irqreturn_t spdif_in_irq(int irq, void *arg)
@@ -202,12 +200,11 @@ static int spdif_in_probe(struct platform_device *pdev)
 {
 	struct spdif_in_dev *host;
 	struct spear_spdif_platform_data *pdata;
-	struct resource *res, *res_fifo;
+	struct resource *res_fifo;
 	void __iomem *io_base;
 	int ret;
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	io_base = devm_ioremap_resource(&pdev->dev, res);
+	io_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(io_base))
 		return PTR_ERR(io_base);
 
@@ -221,10 +218,8 @@ static int spdif_in_probe(struct platform_device *pdev)
 
 	host->io_base = io_base;
 	host->irq = platform_get_irq(pdev, 0);
-	if (host->irq < 0) {
-		dev_warn(&pdev->dev, "failed to get IRQ: %d\n", host->irq);
+	if (host->irq < 0)
 		return host->irq;
-	}
 
 	host->clk = devm_clk_get(&pdev->dev, NULL);
 	if (IS_ERR(host->clk))
@@ -246,10 +241,8 @@ static int spdif_in_probe(struct platform_device *pdev)
 
 	ret = devm_request_irq(&pdev->dev, host->irq, spdif_in_irq, 0,
 			"spdif-in", host);
-	if (ret) {
-		dev_warn(&pdev->dev, "request_irq failed\n");
+	if (ret)
 		return ret;
-	}
 
 	ret = devm_snd_soc_register_component(&pdev->dev, &spdif_in_component,
 					      &spdif_in_dai, 1);

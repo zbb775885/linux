@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright 2014, Michael Ellerman, IBM Corp.
- * Licensed under GPLv2.
  */
 
 #include <sched.h>
@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <time.h>
 
 #include "ebb.h"
 
@@ -22,6 +23,7 @@ static int test_body(void)
 {
 	int i, orig_period, max_period;
 	struct event event;
+	struct timespec ts = { .tv_sec = 0, .tv_nsec = 1 };
 
 	SKIP_IF(!ebb_is_supported());
 
@@ -57,10 +59,15 @@ static int test_body(void)
 		 * kernel to decide our timeslice is up and context switch to
 		 * the other thread. When we come back our EBB will have been
 		 * lost and we'll spin in this while loop forever.
+		 *
+		 * Use nanosleep(0) instead of sched_yield() to guarantee a
+		 * context switch to the eat_cpu child regardless of the
+		 * eligibility state. sched_yield() via yield_task_fair() may
+		 * become a no-op when the task is ineligible (vruntime ahead
+		 * of avg_vruntime), preventing the required context switch.
 		 */
-
 		for (i = 0; i < 100000; i++)
-			sched_yield();
+			nanosleep(&ts, NULL);
 
 		/* Change the sample period slightly to try and hit the race */
 		if (sample_period >= (orig_period + 200))
@@ -75,7 +82,6 @@ static int test_body(void)
 	ebb_freeze_pmcs();
 	ebb_global_disable();
 
-	count_pmc(4, sample_period);
 	mtspr(SPRN_PMC4, 0xdead);
 
 	dump_summary_ebb_state();
@@ -98,5 +104,6 @@ static int lost_exception(void)
 
 int main(void)
 {
+	test_harness_set_timeout(300);
 	return test_harness(lost_exception, "lost_exception");
 }

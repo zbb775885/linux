@@ -292,7 +292,7 @@ bool scsi_opcode_sa_name(int opcode, int service_action,
 }
 
 struct error_info {
-	unsigned short code12;	/* 0x0302 looks better than 0x03,0x02 */
+	unsigned short code;	/* 0x0302 looks better than 0x03,0x02 */
 	unsigned short size;
 };
 
@@ -318,20 +318,46 @@ static const char *additional_text =
 	;
 
 struct error_info2 {
-	unsigned char code1, code2_min, code2_max;
-	const char * str;
-	const char * fmt;
+	u8		asc;
+	u8		ascq_min;
+	u8		ascq_max;
+	const char	*str;
+	const char	*fmt;
 };
 
 static const struct error_info2 additional2[] =
 {
-	{0x40, 0x00, 0x7f, "Ram failure", ""},
-	{0x40, 0x80, 0xff, "Diagnostic failure on component", ""},
-	{0x41, 0x00, 0xff, "Data path failure", ""},
-	{0x42, 0x00, 0xff, "Power-on or self-test failure", ""},
-	{0x4D, 0x00, 0xff, "Tagged overlapped commands", "task tag "},
-	{0x70, 0x00, 0xff, "Decompression exception", "short algorithm id of "},
-	{0, 0, 0, NULL, NULL}
+	{
+		ASC_RAM_FAILURE,
+		0x00, 0x7f,
+		"Ram failure", ""
+	},
+	{
+		ASC_RAM_FAILURE,
+		0x80, 0xff,
+		"Diagnostic failure on component", ""
+	},
+	{
+		ASC_DATA_PATH_FAILURE,
+		0x00, 0xff,
+		"Data path failure", ""
+	},
+	{
+		ASC_POWER_ON_OR_SELFTEST_FAILURE,
+		0x00, 0xff,
+		"Power-on or self-test failure", ""
+	},
+	{
+		ASC_TAGGED_OVERLAPPED_COMMANDS,
+		0x00, 0xff,
+		"Tagged overlapped commands", "task tag "
+	},
+	{
+		ASC_DECOMPRESSION_EXCEPTION_SHORT_ALGORITHM_ID,
+		0x00, 0xff,
+		"Decompression exception", "short algorithm id of "
+	},
+	{ 0, 0, 0, NULL, NULL }
 };
 
 /* description of the sense key values */
@@ -375,22 +401,21 @@ EXPORT_SYMBOL(scsi_sense_key_string);
  * This string may contain a "%x" and should be printed with ascq as arg.
  */
 const char *
-scsi_extd_sense_format(unsigned char asc, unsigned char ascq, const char **fmt)
+scsi_extd_sense_format(const struct scsi_sense_hdr *sshdr, const char **fmt)
 {
-	int i;
-	unsigned short code = ((asc << 8) | ascq);
 	unsigned offset = 0;
+	int i;
 
 	*fmt = NULL;
 	for (i = 0; i < ARRAY_SIZE(additional); i++) {
-		if (additional[i].code12 == code)
+		if (additional[i].code == sshdr->sense_code)
 			return additional_text + offset;
 		offset += additional[i].size;
 	}
 	for (i = 0; additional2[i].fmt; i++) {
-		if (additional2[i].code1 == asc &&
-		    ascq >= additional2[i].code2_min &&
-		    ascq <= additional2[i].code2_max) {
+		if (additional2[i].asc == scsi_sense_asc(sshdr) &&
+		    scsi_sense_ascq(sshdr) >= additional2[i].ascq_min &&
+		    scsi_sense_ascq(sshdr) <= additional2[i].ascq_max) {
 			*fmt = additional2[i].fmt;
 			return additional2[i].str;
 		}
@@ -404,33 +429,18 @@ static const char * const hostbyte_table[]={
 "DID_ABORT", "DID_PARITY", "DID_ERROR", "DID_RESET", "DID_BAD_INTR",
 "DID_PASSTHROUGH", "DID_SOFT_ERROR", "DID_IMM_RETRY", "DID_REQUEUE",
 "DID_TRANSPORT_DISRUPTED", "DID_TRANSPORT_FAILFAST", "DID_TARGET_FAILURE",
-"DID_NEXUS_FAILURE" };
-
-static const char * const driverbyte_table[]={
-"DRIVER_OK", "DRIVER_BUSY", "DRIVER_SOFT",  "DRIVER_MEDIA", "DRIVER_ERROR",
-"DRIVER_INVALID", "DRIVER_TIMEOUT", "DRIVER_HARD", "DRIVER_SENSE"};
+"DID_NEXUS_FAILURE", "DID_ALLOC_FAILURE", "DID_MEDIUM_ERROR" };
 
 const char *scsi_hostbyte_string(int result)
 {
+	enum scsi_host_status hb = host_byte(result);
 	const char *hb_string = NULL;
-	int hb = host_byte(result);
 
 	if (hb < ARRAY_SIZE(hostbyte_table))
 		hb_string = hostbyte_table[hb];
 	return hb_string;
 }
 EXPORT_SYMBOL(scsi_hostbyte_string);
-
-const char *scsi_driverbyte_string(int result)
-{
-	const char *db_string = NULL;
-	int db = driver_byte(result);
-
-	if (db < ARRAY_SIZE(driverbyte_table))
-		db_string = driverbyte_table[db];
-	return db_string;
-}
-EXPORT_SYMBOL(scsi_driverbyte_string);
 
 #define scsi_mlreturn_name(result)	{ result, #result }
 static const struct value_name_pair scsi_mlreturn_arr[] = {

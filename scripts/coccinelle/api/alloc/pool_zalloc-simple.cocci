@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 ///
 /// Use *_pool_zalloc rather than *_pool_alloc followed by memset with 0
 ///
-// Copyright: (C) 2015 Intel Corp.  GPLv2.
+// Copyright: (C) 2015 Intel Corp.
 // Options: --no-includes --include-headers
 //
-// Keywords: dma_pool_zalloc, pci_pool_zalloc
+// Keywords: dma_pool_zalloc
 //
 
 virtual context
@@ -21,7 +22,7 @@ expression x;
 statement S;
 @@
 
-* x = \(dma_pool_alloc\|pci_pool_alloc\)(...);
+* x = dma_pool_alloc(...);
   if ((x==NULL) || ...) S
 * memset(x,0, ...);
 
@@ -40,17 +41,6 @@ statement S;
   if ((x==NULL) || ...) S
 - memset(x,0,...);
 
-@depends on patch@
-expression x;
-expression a,b,c;
-statement S;
-@@
-
-- x = pci_pool_alloc(a,b,c);
-+ x = pci_pool_zalloc(a,b,c);
-  if ((x==NULL) || ...) S
-- memset(x,0,...);
-
 //----------------------------------------------------------
 //  For org and report mode
 //----------------------------------------------------------
@@ -62,7 +52,7 @@ statement S;
 position p;
 @@
 
- x = @p\(dma_pool_alloc\|pci_pool_alloc\)(a,b,c);
+ x =@p dma_pool_alloc(a,b,c);
  if ((x==NULL) || ...) S
  memset(x,0, ...);
 

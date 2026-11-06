@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
-/**
+/*
  * imr_selftest.c -- Intel Isolated Memory Region self-test driver
  *
  * Copyright(c) 2013 Intel Corporation.
  * Copyright(c) 2015 Bryan O'Donoghue <pure.logic@nexus-software.ie>
  *
  * IMR self test. The purpose of this module is to run a set of tests on the
- * IMR API to validate it's sanity. We check for overlapping, reserved
+ * IMR API to validate its sanity. We check for overlapping, reserved
  * addresses and setup/teardown sanity.
  *
  */
@@ -14,6 +14,8 @@
 #include <asm-generic/sections.h>
 #include <asm/cpu_device_id.h>
 #include <asm/imr.h>
+#include <asm/io.h>
+
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/types.h>
@@ -48,7 +50,7 @@ void __init imr_self_test_result(int res, const char *fmt, ...)
 #undef SELFTEST
 
 /**
- * imr_self_test
+ * imr_self_test - perform the IMR self-test
  *
  * Verify IMR self_test with some simple tests to verify overlap,
  * zero sized allocations and 1 KiB sized areas.
@@ -103,7 +105,7 @@ static void __init imr_self_test(void)
 }
 
 static const struct x86_cpu_id imr_ids[] __initconst = {
-	{ X86_VENDOR_INTEL, 5, 9 },	/* Intel Quark SoC X1000. */
+	X86_MATCH_VFM(INTEL_QUARK_X1000, NULL),
 	{}
 };
 
@@ -119,9 +121,4 @@ static int __init imr_self_test_init(void)
 	return 0;
 }
 
-/**
- * imr_self_test_exit - exit point for IMR code.
- *
- * return:
- */
 device_initcall(imr_self_test_init);

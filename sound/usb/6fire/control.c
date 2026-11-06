@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Linux driver for TerraTec DMX 6Fire USB
  *
@@ -10,11 +11,6 @@
  * Thanks to:
  * - Holger Ruckdeschel: he found out how to control individual channel
  *   volumes and introduced mute switch
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/interrupt.h>
@@ -24,6 +20,7 @@
 #include "control.h"
 #include "comm.h"
 #include "chip.h"
+#include "pcm.h"
 
 static const char * const opt_coax_texts[2] = { "Optical", "Coax" };
 static const char * const line_phono_texts[2] = { "Line", "Phono" };
@@ -152,9 +149,14 @@ static int usb6fire_control_set_channels(
 	if (ret < 0)
 		return ret;
 
-	/* disable digital inputs and outputs */
-	/* TODO: use spdif_x to enable/disable digital channels */
-	ret = comm_rt->write16(comm_rt, 0x02, 0x03, 0x00, 0x00);
+	/*
+	 * digital (S/PDIF) input and output: bit 0 adds four slots (4-7) to
+	 * the capture frame, which carry the subframes of the receiver; up to
+	 * two receiver frames arrive per card frame; bit 1 enables the
+	 * transmitter, which encodes the playback pair in slots 6/7 (pcm.c)
+	 */
+	ret = comm_rt->write16(comm_rt, 0x02, 0x03, 0x00,
+			(spdif_in ? 0x01 : 0x00) | (spdif_out ? 0x02 : 0x00));
 	if (ret < 0)
 		return ret;
 
@@ -164,14 +166,26 @@ static int usb6fire_control_set_channels(
 static int usb6fire_control_streaming_update(struct control_runtime *rt)
 {
 	struct comm_runtime *comm_rt = rt->chip->comm;
+	int err = 0;
+	int ret;
 
 	if (comm_rt) {
+		/*
+		 * the digital pairs are enabled only while a stream runs; the
+		 * streaming register is written even if this write fails.
+		 * usb6fire_control_digital_thru_put() holds stream_mutex, so
+		 * this write cannot run after set_channels() and before
+		 * streaming starts in usb6fire_pcm_set_rate()
+		 */
+		if (!rt->usb_streaming)
+			err = comm_rt->write16(comm_rt, 0x02, 0x03, 0x00, 0x00);
 		if (!rt->usb_streaming && rt->digital_thru_switch)
 			usb6fire_control_set_rate(rt,
 				DIGITAL_THRU_ONLY_SAMPLERATE);
-		return comm_rt->write16(comm_rt, 0x02, 0x00, 0x00,
+		ret = comm_rt->write16(comm_rt, 0x02, 0x00, 0x00,
 			(rt->usb_streaming ? 0x01 : 0x00) |
 			(rt->digital_thru_switch ? 0x08 : 0x00));
+		return err < 0 ? err : ret;
 	}
 	return -EINVAL;
 }
@@ -294,15 +308,17 @@ static int usb6fire_control_input_vol_put(struct snd_kcontrol *kcontrol,
 		struct snd_ctl_elem_value *ucontrol)
 {
 	struct control_runtime *rt = snd_kcontrol_chip(kcontrol);
+	int vol0 = ucontrol->value.integer.value[0] - 15;
+	int vol1 = ucontrol->value.integer.value[1] - 15;
 	int changed = 0;
 
-	if (rt->input_vol[0] != ucontrol->value.integer.value[0]) {
-		rt->input_vol[0] = ucontrol->value.integer.value[0] - 15;
+	if (rt->input_vol[0] != vol0) {
+		rt->input_vol[0] = vol0;
 		rt->ivol_updated &= ~(1 << 0);
 		changed = 1;
 	}
-	if (rt->input_vol[1] != ucontrol->value.integer.value[1]) {
-		rt->input_vol[1] = ucontrol->value.integer.value[1] - 15;
+	if (rt->input_vol[1] != vol1) {
+		rt->input_vol[1] = vol1;
 		rt->ivol_updated &= ~(1 << 1);
 		changed = 1;
 	}
@@ -385,6 +401,12 @@ static int usb6fire_control_digital_thru_put(struct snd_kcontrol *kcontrol,
 	struct control_runtime *rt = snd_kcontrol_chip(kcontrol);
 	int changed = 0;
 
+	/*
+	 * with Digital Thru on, streaming_update() selects the altsetting and
+	 * writes the clock register of an idle card; prepare does the same
+	 * under stream_mutex
+	 */
+	guard(mutex)(&rt->chip->pcm->stream_mutex);
 	if (rt->digital_thru_switch != ucontrol->value.integer.value[0]) {
 		rt->digital_thru_switch = ucontrol->value.integer.value[0];
 		usb6fire_control_streaming_update(rt);
@@ -401,7 +423,7 @@ static int usb6fire_control_digital_thru_get(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static struct snd_kcontrol_new vol_elements[] = {
+static const struct snd_kcontrol_new vol_elements[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Analog Playback Volume",
@@ -441,7 +463,7 @@ static struct snd_kcontrol_new vol_elements[] = {
 	{}
 };
 
-static struct snd_kcontrol_new mute_elements[] = {
+static const struct snd_kcontrol_new mute_elements[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Analog Playback Switch",
@@ -475,7 +497,7 @@ static struct snd_kcontrol_new mute_elements[] = {
 	{}
 };
 
-static struct snd_kcontrol_new elements[] = {
+static const struct snd_kcontrol_new elements[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Line/Phono Capture Route",
@@ -521,7 +543,7 @@ static int usb6fire_control_add_virtual(
 	struct control_runtime *rt,
 	struct snd_card *card,
 	char *name,
-	struct snd_kcontrol_new *elems)
+	const struct snd_kcontrol_new *elems)
 {
 	int ret;
 	int i;
@@ -543,7 +565,7 @@ static int usb6fire_control_add_virtual(
 		ret = snd_ctl_add(card, control);
 		if (ret < 0)
 			return ret;
-		ret = snd_ctl_add_slave(vmaster, control);
+		ret = snd_ctl_add_follower(vmaster, control);
 		if (ret < 0)
 			return ret;
 		i++;
@@ -555,8 +577,7 @@ int usb6fire_control_init(struct sfire_chip *chip)
 {
 	int i;
 	int ret;
-	struct control_runtime *rt = kzalloc(sizeof(struct control_runtime),
-			GFP_KERNEL);
+	struct control_runtime *rt = kzalloc_obj(struct control_runtime);
 	struct comm_runtime *comm_rt = chip->comm;
 
 	if (!rt)
@@ -585,30 +606,31 @@ int usb6fire_control_init(struct sfire_chip *chip)
 		"Master Playback Volume", vol_elements);
 	if (ret) {
 		dev_err(&chip->dev->dev, "cannot add control.\n");
-		kfree(rt);
-		return ret;
+		goto free_rt;
 	}
 	ret = usb6fire_control_add_virtual(rt, chip->card,
 		"Master Playback Switch", mute_elements);
 	if (ret) {
 		dev_err(&chip->dev->dev, "cannot add control.\n");
-		kfree(rt);
-		return ret;
+		goto free_rt;
 	}
 
 	i = 0;
 	while (elements[i].name) {
 		ret = snd_ctl_add(chip->card, snd_ctl_new1(&elements[i], rt));
 		if (ret < 0) {
-			kfree(rt);
 			dev_err(&chip->dev->dev, "cannot add control.\n");
-			return ret;
+			goto free_rt;
 		}
 		i++;
 	}
 
 	chip->control = rt;
 	return 0;
+
+free_rt:
+	kfree(rt);
+	return ret;
 }
 
 void usb6fire_control_abort(struct sfire_chip *chip)

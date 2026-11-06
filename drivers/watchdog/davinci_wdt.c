@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * drivers/char/watchdog/davinci_wdt.c
  *
@@ -5,10 +6,7 @@
  *
  * Copyright (C) 2006-2013 Texas Instruments.
  *
- * 2007 (c) MontaVista Software, Inc. This file is licensed under
- * the terms of the GNU General Public License version 2. This program
- * is licensed "as is" without any warranty of any kind, whether express
- * or implied.
+ * 2007 (c) MontaVista Software, Inc.
  */
 
 #include <linux/module.h>
@@ -21,6 +19,7 @@
 #include <linux/device.h>
 #include <linux/clk.h>
 #include <linux/err.h>
+#include <linux/stringify.h>
 
 #define MODULE_NAME "DAVINCI-WDT: "
 
@@ -122,7 +121,7 @@ static unsigned int davinci_wdt_get_timeleft(struct watchdog_device *wdd)
 	u32 val;
 	struct davinci_wdt_device *davinci_wdt = watchdog_get_drvdata(wdd);
 
-	/* if timeout has occured then return 0 */
+	/* if timeout has occurred then return 0 */
 	val = ioread32(davinci_wdt->base + WDTCR);
 	if (val & WDFLAG)
 		return 0;
@@ -135,7 +134,7 @@ static unsigned int davinci_wdt_get_timeleft(struct watchdog_device *wdd)
 	timer_counter = ioread32(davinci_wdt->base + TIM12);
 	timer_counter |= ((u64)ioread32(davinci_wdt->base + TIM34) << 32);
 
-	do_div(timer_counter, freq);
+	timer_counter = div64_ul(timer_counter, freq);
 
 	return wdd->timeout - timer_counter;
 }
@@ -192,9 +191,7 @@ static const struct watchdog_ops davinci_wdt_ops = {
 
 static int davinci_wdt_probe(struct platform_device *pdev)
 {
-	int ret = 0;
 	struct device *dev = &pdev->dev;
-	struct resource  *wdt_mem;
 	struct watchdog_device *wdd;
 	struct davinci_wdt_device *davinci_wdt;
 
@@ -202,19 +199,10 @@ static int davinci_wdt_probe(struct platform_device *pdev)
 	if (!davinci_wdt)
 		return -ENOMEM;
 
-	davinci_wdt->clk = devm_clk_get(dev, NULL);
-
-	if (IS_ERR(davinci_wdt->clk)) {
-		if (PTR_ERR(davinci_wdt->clk) != -EPROBE_DEFER)
-			dev_err(&pdev->dev, "failed to get clock node\n");
-		return PTR_ERR(davinci_wdt->clk);
-	}
-
-	ret = clk_prepare_enable(davinci_wdt->clk);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to prepare clock\n");
-		return ret;
-	}
+	davinci_wdt->clk = devm_clk_get_enabled(dev, NULL);
+	if (IS_ERR(davinci_wdt->clk))
+		return dev_err_probe(dev, PTR_ERR(davinci_wdt->clk),
+				     "failed to get clock node\n");
 
 	platform_set_drvdata(pdev, davinci_wdt);
 
@@ -224,7 +212,7 @@ static int davinci_wdt_probe(struct platform_device *pdev)
 	wdd->min_timeout	= 1;
 	wdd->max_timeout	= MAX_HEARTBEAT;
 	wdd->timeout		= DEFAULT_HEARTBEAT;
-	wdd->parent		= &pdev->dev;
+	wdd->parent		= dev;
 
 	watchdog_init_timeout(wdd, heartbeat, dev);
 
@@ -234,28 +222,11 @@ static int davinci_wdt_probe(struct platform_device *pdev)
 	watchdog_set_nowayout(wdd, 1);
 	watchdog_set_restart_priority(wdd, 128);
 
-	wdt_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	davinci_wdt->base = devm_ioremap_resource(dev, wdt_mem);
+	davinci_wdt->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(davinci_wdt->base))
 		return PTR_ERR(davinci_wdt->base);
 
-	ret = watchdog_register_device(wdd);
-	if (ret < 0) {
-		clk_disable_unprepare(davinci_wdt->clk);
-		dev_err(dev, "cannot register watchdog device\n");
-	}
-
-	return ret;
-}
-
-static int davinci_wdt_remove(struct platform_device *pdev)
-{
-	struct davinci_wdt_device *davinci_wdt = platform_get_drvdata(pdev);
-
-	watchdog_unregister_device(&davinci_wdt->wdd);
-	clk_disable_unprepare(davinci_wdt->clk);
-
-	return 0;
+	return devm_watchdog_register_device(dev, wdd);
 }
 
 static const struct of_device_id davinci_wdt_of_match[] = {
@@ -270,7 +241,6 @@ static struct platform_driver platform_wdt_driver = {
 		.of_match_table = davinci_wdt_of_match,
 	},
 	.probe = davinci_wdt_probe,
-	.remove = davinci_wdt_remove,
 };
 
 module_platform_driver(platform_wdt_driver);
@@ -281,8 +251,8 @@ MODULE_DESCRIPTION("DaVinci Watchdog Driver");
 module_param(heartbeat, int, 0);
 MODULE_PARM_DESC(heartbeat,
 		 "Watchdog heartbeat period in seconds from 1 to "
-		 __MODULE_STRING(MAX_HEARTBEAT) ", default "
-		 __MODULE_STRING(DEFAULT_HEARTBEAT));
+		 __stringify(MAX_HEARTBEAT) ", default "
+		 __stringify(DEFAULT_HEARTBEAT));
 
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:davinci-wdt");

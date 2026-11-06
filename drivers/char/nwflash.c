@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Flash memory interface rev.5 driver for the Intel
  * Flash chips used on the NetWinder.
@@ -167,7 +168,7 @@ static ssize_t flash_write(struct file *file, const char __user *buf,
 	if (count > gbFlashSize - p)
 		count = gbFlashSize - p;
 			
-	if (!access_ok(VERIFY_READ, buf, count))
+	if (!access_ok(buf, count))
 		return -EFAULT;
 
 	/*
@@ -421,7 +422,7 @@ static int write_block(unsigned long p, const char __user *buf, int count)
 	for (offset = 0; offset < count; offset++, pWritePtr++) {
 		uAddress = (unsigned int) pWritePtr;
 		uAddress &= 0xFFFFFFFC;
-		if (__get_user(c2, buf + offset))
+		if (get_user(c2, buf + offset))
 			return -EFAULT;
 
 	  WriteRetry:
@@ -532,7 +533,7 @@ static int write_block(unsigned long p, const char __user *buf, int count)
 
 	for (offset = 0; offset < count; offset++) {
 		char c, c1;
-		if (__get_user(c, buf))
+		if (get_user(c, buf))
 			return -EFAULT;
 		buf++;
 		if ((c1 = *pWritePtr++) != c) {
@@ -575,7 +576,7 @@ static const struct file_operations flash_fops =
 
 static struct miscdevice flash_miscdev =
 {
-	FLASH_MINOR,
+	NWFLASH_MINOR,
 	"nwflash",
 	&flash_fops
 };
@@ -617,6 +618,7 @@ static void __exit nwflash_exit(void)
 	iounmap((void *)FLASH_BASE);
 }
 
+MODULE_DESCRIPTION("NetWinder flash memory driver");
 MODULE_LICENSE("GPL");
 
 module_param(flashdebug, bool, 0644);

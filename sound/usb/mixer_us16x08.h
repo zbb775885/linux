@@ -60,7 +60,7 @@
 #define SND_US16X08_ID_EQHIGHMIDLEVEL 0x03
 #define SND_US16X08_ID_EQHIGHLEVEL 0x04
 
-/* EQ frequence IDs */
+/* EQ frequency IDs */
 #define SND_US16X08_ID_EQLOWFREQ 0x11
 #define SND_US16X08_ID_EQLOWMIDFREQ 0x12
 #define SND_US16X08_ID_EQHIGHMIDFREQ 0x13
@@ -108,7 +108,7 @@ struct snd_us16x08_meter_store {
 };
 
 struct snd_us16x08_control_params {
-	struct snd_kcontrol_new *kcontrol_new;
+	const struct snd_kcontrol_new *kcontrol_new;
 	int control_id;
 	int type;
 	int num_channels;

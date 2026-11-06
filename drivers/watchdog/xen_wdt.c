@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *	Xen Watchdog Driver
  *
  *	(c) Copyright 2010 Novell, Inc.
- *
- *	This program is free software; you can redistribute it and/or
- *	modify it under the terms of the GNU General Public License
- *	as published by the Free Software Foundation; either version
- *	2 of the License, or (at your option) any later version.
  */
 
 #define DRV_NAME	"xen_wdt"
@@ -21,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/platform_device.h>
+#include <linux/stringify.h>
 #include <linux/watchdog.h>
 #include <xen/xen.h>
 #include <asm/xen/hypercall.h>
@@ -34,12 +31,12 @@ static time64_t wdt_expires;
 static unsigned int timeout;
 module_param(timeout, uint, S_IRUGO);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds "
-	"(default=" __MODULE_STRING(WATCHDOG_TIMEOUT) ")");
+	"(default=" __stringify(WATCHDOG_TIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, S_IRUGO);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
-	"(default=" __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	"(default=" __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static inline time64_t set_timeout(struct watchdog_device *wdd)
 {
@@ -122,35 +119,31 @@ static struct watchdog_device xen_wdt_dev = {
 
 static int xen_wdt_probe(struct platform_device *pdev)
 {
+	struct device *dev = &pdev->dev;
 	struct sched_watchdog wd = { .id = ~0 };
 	int ret = HYPERVISOR_sched_op(SCHEDOP_watchdog, &wd);
 
 	if (ret == -ENOSYS) {
-		dev_err(&pdev->dev, "watchdog not supported by hypervisor\n");
+		dev_err(dev, "watchdog not supported by hypervisor\n");
 		return -ENODEV;
 	}
 
 	if (ret != -EINVAL) {
-		dev_err(&pdev->dev, "unexpected hypervisor error (%d)\n", ret);
+		dev_err(dev, "unexpected hypervisor error (%d)\n", ret);
 		return -ENODEV;
 	}
 
-	if (watchdog_init_timeout(&xen_wdt_dev, timeout, NULL))
-		dev_info(&pdev->dev, "timeout value invalid, using %d\n",
-			xen_wdt_dev.timeout);
+	watchdog_init_timeout(&xen_wdt_dev, timeout, NULL);
 	watchdog_set_nowayout(&xen_wdt_dev, nowayout);
 	watchdog_stop_on_reboot(&xen_wdt_dev);
 	watchdog_stop_on_unregister(&xen_wdt_dev);
 
-	ret = devm_watchdog_register_device(&pdev->dev, &xen_wdt_dev);
-	if (ret) {
-		dev_err(&pdev->dev, "cannot register watchdog device (%d)\n",
-			ret);
+	ret = devm_watchdog_register_device(dev, &xen_wdt_dev);
+	if (ret)
 		return ret;
-	}
 
-	dev_info(&pdev->dev, "initialized (timeout=%ds, nowayout=%d)\n",
-		xen_wdt_dev.timeout, nowayout);
+	dev_info(dev, "initialized (timeout=%ds, nowayout=%d)\n",
+		 xen_wdt_dev.timeout, nowayout);
 
 	return 0;
 }

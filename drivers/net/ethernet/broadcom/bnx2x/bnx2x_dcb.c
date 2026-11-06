@@ -344,7 +344,7 @@ static void  bnx2x_dcbx_get_pfc_feature(struct bnx2x *bp,
 	}
 }
 
-/* maps unmapped priorities to to the same COS as L2 */
+/* maps unmapped priorities to the same COS as L2 */
 static void bnx2x_dcbx_map_nw(struct bnx2x *bp)
 {
 	int i;
@@ -1145,7 +1145,7 @@ static void bnx2x_dcbx_get_num_pg_traf_type(struct bnx2x *bp,
 					break;
 				}
 			}
-			if (false == pg_found) {
+			if (!pg_found) {
 				data[help_data->num_of_pg].pg = add_pg;
 				data[help_data->num_of_pg].pg_priority =
 						(1 << ttp[add_traf_type]);
@@ -1155,7 +1155,7 @@ static void bnx2x_dcbx_get_num_pg_traf_type(struct bnx2x *bp,
 		}
 		DP(BNX2X_MSG_DCB,
 		   "add_traf_type %d pg_found %s num_of_pg %d\n",
-		   add_traf_type, (false == pg_found) ? "NO" : "YES",
+		   add_traf_type, !pg_found ? "NO" : "YES",
 		   help_data->num_of_pg);
 	}
 }
@@ -1544,8 +1544,7 @@ static void bnx2x_dcbx_2cos_limit_cee_three_pg_to_cos_params(
 			if (pg_entry < DCBX_MAX_NUM_PG_BW_ENTRIES) {
 				entry = 0;
 
-				if (i == (num_of_pri-1) &&
-				    false == b_found_strict)
+				if (i == (num_of_pri-1) && !b_found_strict)
 					/* last entry will be handled separately
 					 * If no priority is strict than last
 					 * entry goes to last queue.
@@ -1987,7 +1986,7 @@ static void bnx2x_dcbnl_set_pg_tccfg_tx(struct net_device *netdev, int prio,
 		return;
 
 	/**
-	 * bw_pct ignored -	band-width percentage devision between user
+	 * bw_pct ignored -	band-width percentage division between user
 	 *			priorities within the same group is not
 	 *			standard and hence not supported
 	 *
@@ -2039,7 +2038,7 @@ static void bnx2x_dcbnl_get_pg_tccfg_tx(struct net_device *netdev, int prio,
 	DP(BNX2X_MSG_DCB, "prio = %d\n", prio);
 
 	/**
-	 * bw_pct ignored -	band-width percentage devision between user
+	 * bw_pct ignored -	band-width percentage division between user
 	 *			priorities within the same group is not
 	 *			standard and hence not supported
 	 *

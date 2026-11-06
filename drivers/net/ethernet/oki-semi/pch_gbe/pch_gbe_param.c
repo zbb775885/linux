@@ -1,30 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 1999 - 2010 Intel Corporation.
  * Copyright (C) 2010 OKI SEMICONDUCTOR Co., LTD.
  *
  * This code was derived from the Intel e1000e Linux driver.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "pch_gbe.h"
-#include <linux/module.h>	/* for __MODULE_STRING */
+#include <linux/module.h>
+#include <linux/stringify.h>
 
 #define OPTION_UNSET   -1
 #define OPTION_DISABLED 0
 #define OPTION_ENABLED  1
 
-/**
+/*
  * TxDescriptors - Transmit Descriptor Count
  * @Valid Range:   PCH_GBE_MIN_TXD - PCH_GBE_MAX_TXD
  * @Default Value: PCH_GBE_DEFAULT_TXD
@@ -33,7 +23,7 @@ static int TxDescriptors = OPTION_UNSET;
 module_param(TxDescriptors, int, 0);
 MODULE_PARM_DESC(TxDescriptors, "Number of transmit descriptors");
 
-/**
+/*
  * RxDescriptors -Receive Descriptor Count
  * @Valid Range:   PCH_GBE_MIN_RXD - PCH_GBE_MAX_RXD
  * @Default Value: PCH_GBE_DEFAULT_RXD
@@ -42,7 +32,7 @@ static int RxDescriptors = OPTION_UNSET;
 module_param(RxDescriptors, int, 0);
 MODULE_PARM_DESC(RxDescriptors, "Number of receive descriptors");
 
-/**
+/*
  * Speed - User Specified Speed Override
  * @Valid Range: 0, 10, 100, 1000
  *   - 0:    auto-negotiate at all supported speeds
@@ -55,7 +45,7 @@ static int Speed = OPTION_UNSET;
 module_param(Speed, int, 0);
 MODULE_PARM_DESC(Speed, "Speed setting");
 
-/**
+/*
  * Duplex - User Specified Duplex Override
  * @Valid Range: 0-2
  *   - 0:  auto-negotiate for duplex
@@ -70,7 +60,7 @@ MODULE_PARM_DESC(Duplex, "Duplex setting");
 #define HALF_DUPLEX 1
 #define FULL_DUPLEX 2
 
-/**
+/*
  * AutoNeg - Auto-negotiation Advertisement Override
  * @Valid Range: 0x01-0x0F, 0x20-0x2F
  *
@@ -96,7 +86,7 @@ MODULE_PARM_DESC(AutoNeg, "Advertised auto-negotiation setting");
 #define PHY_ADVERTISE_1000_FULL    0x0020
 #define PCH_AUTONEG_ADVERTISE_DEFAULT   0x2F
 
-/**
+/*
  * FlowControl - User Specified Flow Control Override
  * @Valid Range: 0-3
  *    - 0:  No Flow Control
@@ -135,7 +125,7 @@ MODULE_PARM_DESC(XsumTX, "Disable or enable Transmit Checksum offload");
 
 #define PCH_GBE_DEFAULT_TX_CSUM             true	/* trueorfalse */
 
-/**
+/*
  * pch_gbe_option - Force the MAC's flow control settings
  * @hw:	            Pointer to the HW structure
  * Returns:
@@ -421,7 +411,7 @@ static void pch_gbe_check_copper_options(struct pch_gbe_adapter *adapter)
 	case SPEED_1000 + HALF_DUPLEX:
 		netdev_dbg(adapter->netdev,
 			   "Half Duplex is not supported at 1000 Mbps\n");
-		/* fall through */
+		fallthrough;
 	case SPEED_1000 + FULL_DUPLEX:
 full_duplex_only:
 		netdev_dbg(adapter->netdev,
@@ -451,7 +441,7 @@ void pch_gbe_check_options(struct pch_gbe_adapter *adapter)
 			.type = range_option,
 			.name = "Transmit Descriptors",
 			.err  = "using default of "
-				__MODULE_STRING(PCH_GBE_DEFAULT_TXD),
+				__stringify(PCH_GBE_DEFAULT_TXD),
 			.def  = PCH_GBE_DEFAULT_TXD,
 			.arg  = { .r = { .min = PCH_GBE_MIN_TXD,
 					 .max = PCH_GBE_MAX_TXD } }
@@ -467,7 +457,7 @@ void pch_gbe_check_options(struct pch_gbe_adapter *adapter)
 			.type = range_option,
 			.name = "Receive Descriptors",
 			.err  = "using default of "
-				__MODULE_STRING(PCH_GBE_DEFAULT_RXD),
+				__stringify(PCH_GBE_DEFAULT_RXD),
 			.def  = PCH_GBE_DEFAULT_RXD,
 			.arg  = { .r = { .min = PCH_GBE_MIN_RXD,
 					 .max = PCH_GBE_MAX_RXD } }

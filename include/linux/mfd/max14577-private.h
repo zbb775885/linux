@@ -1,19 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * max14577-private.h - Common API for the Maxim 14577/77836 internal sub chip
  *
- * Copyright (C) 2014 Samsung Electrnoics
+ * Copyright (C) 2014 Samsung Electronics
  * Chanwoo Choi <cw00.choi@samsung.com>
  * Krzysztof Kozlowski <krzk@kernel.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #ifndef __MAX14577_PRIVATE_H__
@@ -359,6 +350,9 @@ enum max77836_pmic_reg {
 #define MAX77836_CNFG1_LDO_PWRMD_SHIFT		6
 #define MAX77836_CNFG1_LDO_TV_SHIFT		0
 #define MAX77836_CNFG1_LDO_PWRMD_MASK		(0x3 << MAX77836_CNFG1_LDO_PWRMD_SHIFT)
+#define MAX77836_CNFG1_LDO_PWRMD_OFF		(0x0 << MAX77836_CNFG1_LDO_PWRMD_SHIFT)
+#define MAX77836_CNFG1_LDO_PWRMD_LPM		(0x1 << MAX77836_CNFG1_LDO_PWRMD_SHIFT)
+#define MAX77836_CNFG1_LDO_PWRMD_NORMAL		(0x3 << MAX77836_CNFG1_LDO_PWRMD_SHIFT)
 #define MAX77836_CNFG1_LDO_TV_MASK		(0x3f << MAX77836_CNFG1_LDO_TV_SHIFT)
 
 /* LDO1/LDO2 CONFIG2 register */

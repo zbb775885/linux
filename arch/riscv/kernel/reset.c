@@ -1,36 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2012 Regents of the University of California
- *
- *   This program is free software; you can redistribute it and/or
- *   modify it under the terms of the GNU General Public License
- *   as published by the Free Software Foundation, version 2.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
  */
 
+#include <linux/efi.h>
 #include <linux/reboot.h>
-#include <linux/export.h>
-#include <asm/sbi.h>
+#include <linux/pm.h>
 
-void (*pm_power_off)(void) = machine_power_off;
+static void __noreturn default_power_off(void)
+{
+	while (1)
+		wait_for_interrupt();
+}
+
+void (*pm_power_off)(void) = NULL;
 EXPORT_SYMBOL(pm_power_off);
 
 void machine_restart(char *cmd)
 {
+	/*
+	 * UpdateCapsule() depends on the system being reset via ResetSystem().
+	 */
+	if (efi_enabled(EFI_RUNTIME_SERVICES))
+		efi_reboot(reboot_mode, NULL);
+
 	do_kernel_restart(cmd);
 	while (1);
 }
 
 void machine_halt(void)
 {
-	machine_power_off();
+	do_kernel_power_off();
+	default_power_off();
 }
 
 void machine_power_off(void)
 {
-	sbi_shutdown();
-	while (1);
+	do_kernel_power_off();
+	default_power_off();
 }

@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Virtual DMA channel support for DMAengine
  *
  * Copyright (C) 2012 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #ifndef VIRT_DMA_H
 #define VIRT_DMA_H
@@ -17,6 +14,7 @@
 
 struct virt_dma_desc {
 	struct dma_async_tx_descriptor tx;
+	struct dmaengine_result tx_result;
 	/* protected by vc.lock */
 	struct list_head node;
 };
@@ -33,14 +31,19 @@ struct virt_dma_chan {
 	struct list_head desc_submitted;
 	struct list_head desc_issued;
 	struct list_head desc_completed;
+	struct list_head desc_terminated;
 
 	struct virt_dma_desc *cyclic;
-	struct virt_dma_desc *vd_terminated;
 };
 
 static inline struct virt_dma_chan *to_virt_chan(struct dma_chan *chan)
 {
 	return container_of(chan, struct virt_dma_chan, chan);
+}
+
+static inline struct device *vchan_chan_dev(struct virt_dma_chan *vc)
+{
+	return dmaengine_chan_dev(&vc->chan);
 }
 
 void vchan_dma_desc_free_list(struct virt_dma_chan *vc, struct list_head *head);
@@ -65,6 +68,9 @@ static inline struct dma_async_tx_descriptor *vchan_tx_prep(struct virt_dma_chan
 	vd->tx.tx_submit = vchan_tx_submit;
 	vd->tx.desc_free = vchan_tx_desc_free;
 
+	vd->tx_result.result = DMA_TRANS_NOERROR;
+	vd->tx_result.residue = 0;
+
 	spin_lock_irqsave(&vc->lock, flags);
 	list_add_tail(&vd->node, &vc->desc_allocated);
 	spin_unlock_irqrestore(&vc->lock, flags);
@@ -80,6 +86,8 @@ static inline struct dma_async_tx_descriptor *vchan_tx_prep(struct virt_dma_chan
  */
 static inline bool vchan_issue_pending(struct virt_dma_chan *vc)
 {
+	lockdep_assert_held(&vc->lock);
+
 	list_splice_tail_init(&vc->desc_submitted, &vc->desc_issued);
 	return !list_empty(&vc->desc_issued);
 }
@@ -94,6 +102,8 @@ static inline void vchan_cookie_complete(struct virt_dma_desc *vd)
 {
 	struct virt_dma_chan *vc = to_virt_chan(vd->tx.chan);
 	dma_cookie_t cookie;
+
+	lockdep_assert_held(&vc->lock);
 
 	cookie = vd->tx.cookie;
 	dma_cookie_complete(&vd->tx);
@@ -112,10 +122,15 @@ static inline void vchan_vdesc_fini(struct virt_dma_desc *vd)
 {
 	struct virt_dma_chan *vc = to_virt_chan(vd->tx.chan);
 
-	if (dmaengine_desc_test_reuse(&vd->tx))
+	if (dmaengine_desc_test_reuse(&vd->tx)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&vc->lock, flags);
 		list_add(&vd->node, &vc->desc_allocated);
-	else
+		spin_unlock_irqrestore(&vc->lock, flags);
+	} else {
 		vc->desc_free(vd);
+	}
 }
 
 /**
@@ -140,11 +155,10 @@ static inline void vchan_terminate_vdesc(struct virt_dma_desc *vd)
 {
 	struct virt_dma_chan *vc = to_virt_chan(vd->tx.chan);
 
-	/* free up stuck descriptor */
-	if (vc->vd_terminated)
-		vchan_vdesc_fini(vc->vd_terminated);
+	lockdep_assert_held(&vc->lock);
 
-	vc->vd_terminated = vd;
+	list_add_tail(&vd->node, &vc->desc_terminated);
+
 	if (vc->cyclic == vd)
 		vc->cyclic = NULL;
 }
@@ -157,6 +171,8 @@ static inline void vchan_terminate_vdesc(struct virt_dma_desc *vd)
  */
 static inline struct virt_dma_desc *vchan_next_desc(struct virt_dma_chan *vc)
 {
+	lockdep_assert_held(&vc->lock);
+
 	return list_first_entry_or_null(&vc->desc_issued,
 					struct virt_dma_desc, node);
 }
@@ -174,10 +190,13 @@ static inline struct virt_dma_desc *vchan_next_desc(struct virt_dma_chan *vc)
 static inline void vchan_get_all_descriptors(struct virt_dma_chan *vc,
 	struct list_head *head)
 {
+	lockdep_assert_held(&vc->lock);
+
 	list_splice_tail_init(&vc->desc_allocated, head);
 	list_splice_tail_init(&vc->desc_submitted, head);
 	list_splice_tail_init(&vc->desc_issued, head);
 	list_splice_tail_init(&vc->desc_completed, head);
+	list_splice_tail_init(&vc->desc_terminated, head);
 }
 
 static inline void vchan_free_chan_resources(struct virt_dma_chan *vc)
@@ -196,6 +215,17 @@ static inline void vchan_free_chan_resources(struct virt_dma_chan *vc)
 }
 
 /**
+ * vchan_chan_name - Return vchan DMA channel device name
+ * @vc: virtual channel
+ *
+ * Return: The name of the DMA channel device
+ */
+static inline const char *vchan_chan_name(struct virt_dma_chan *vc)
+{
+	return dma_chan_name(&vc->chan);
+}
+
+/**
  * vchan_synchronize() - synchronize callback execution to the current context
  * @vc: virtual channel to synchronize
  *
@@ -206,16 +236,18 @@ static inline void vchan_free_chan_resources(struct virt_dma_chan *vc)
  */
 static inline void vchan_synchronize(struct virt_dma_chan *vc)
 {
+	LIST_HEAD(head);
 	unsigned long flags;
 
 	tasklet_kill(&vc->task);
 
 	spin_lock_irqsave(&vc->lock, flags);
-	if (vc->vd_terminated) {
-		vchan_vdesc_fini(vc->vd_terminated);
-		vc->vd_terminated = NULL;
-	}
+
+	list_splice_tail_init(&vc->desc_terminated, &head);
+
 	spin_unlock_irqrestore(&vc->lock, flags);
+
+	vchan_dma_desc_free_list(vc, &head);
 }
 
 #endif

@@ -1,19 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 1999 ARM Limited
  * Copyright (C) 2000 Deep Blue Solutions Ltd
  * Copyright 2006-2007 Freescale Semiconductor, Inc. All Rights Reserved.
  * Copyright 2008 Juergen Beisert, kernel@pengutronix.de
  * Copyright 2009 Ilya Yanok, Emcraft Systems Ltd, yanok@emcraft.com
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/kernel.h>
@@ -82,14 +73,6 @@ void __init mxc_arch_reset_init(void __iomem *base)
 	else
 		clk_prepare(wdog_clk);
 }
-
-#ifdef CONFIG_SOC_IMX1
-void __init imx1_reset_init(void __iomem *base)
-{
-	wcr_enable = (1 << 0);
-	mxc_arch_reset_init(base);
-}
-#endif
 
 #ifdef CONFIG_CACHE_L2X0
 void __init imx_init_l2cache(void)

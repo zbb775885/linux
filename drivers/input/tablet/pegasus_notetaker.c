@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Pegasus Mobile Notetaker Pen input tablet driver
  *
@@ -35,16 +36,14 @@
  * T	Tip
  */
 
+#include <linux/hid.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/input.h>
 #include <linux/usb/input.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
-
-/* USB HID defines */
-#define USB_REQ_GET_REPORT		0x01
-#define USB_REQ_SET_REPORT		0x09
+#include <linux/mutex.h>
 
 #define USB_VENDOR_ID_PEGASUSTECH	0x0e20
 #define USB_DEVICE_ID_PEGASUS_NOTETAKER_EN100	0x0101
@@ -61,6 +60,9 @@
 #define BUTTON_PRESSED			0xb5
 #define COMMAND_VERSION			0xa9
 
+/* 1 Status + 1 Color + 2 X + 2 Y = 6 bytes */
+#define NOTETAKER_PACKET_SIZE		6
+
 /* in xy data packet */
 #define BATTERY_NO_REPORT		0x40
 #define BATTERY_LOW			0x41
@@ -76,6 +78,11 @@ struct pegasus {
 	struct usb_device *usbdev;
 	struct usb_interface *intf;
 	struct urb *irq;
+
+	/* serialize access to open/suspend */
+	struct mutex pm_mutex;
+	bool is_open;
+
 	char name[128];
 	char phys[64];
 	struct work_struct init;
@@ -98,7 +105,7 @@ static int pegasus_control_msg(struct pegasus *pegasus, u8 *data, int len)
 
 	result = usb_control_msg(pegasus->usbdev,
 				 usb_sndctrlpipe(pegasus->usbdev, 0),
-				 USB_REQ_SET_REPORT,
+				 HID_REQ_SET_REPORT,
 				 USB_TYPE_VENDOR | USB_DIR_OUT,
 				 0, 0, cmd_buf, sizeof_buf,
 				 USB_CTRL_SET_TIMEOUT);
@@ -139,7 +146,7 @@ static void pegasus_parse_packet(struct pegasus *pegasus)
 	/* xy data */
 	case BATTERY_LOW:
 		dev_warn_once(&dev->dev, "Pen battery low\n");
-		/* fall through */
+		fallthrough;
 
 	case BATTERY_NO_REPORT:
 	case BATTERY_GOOD:
@@ -207,6 +214,28 @@ static void pegasus_init(struct work_struct *work)
 			error);
 }
 
+static int __pegasus_open(struct pegasus *pegasus)
+{
+	int error;
+
+	guard(mutex)(&pegasus->pm_mutex);
+
+	pegasus->irq->dev = pegasus->usbdev;
+	if (usb_submit_urb(pegasus->irq, GFP_KERNEL))
+		return -EIO;
+
+	error = pegasus_set_mode(pegasus, PEN_MODE_XY, NOTETAKER_LED_MOUSE);
+	if (error) {
+		usb_kill_urb(pegasus->irq);
+		cancel_work_sync(&pegasus->init);
+		return error;
+	}
+
+	pegasus->is_open = true;
+
+	return 0;
+}
+
 static int pegasus_open(struct input_dev *dev)
 {
 	struct pegasus *pegasus = input_get_drvdata(dev);
@@ -216,32 +245,26 @@ static int pegasus_open(struct input_dev *dev)
 	if (error)
 		return error;
 
-	pegasus->irq->dev = pegasus->usbdev;
-	if (usb_submit_urb(pegasus->irq, GFP_KERNEL)) {
-		error = -EIO;
-		goto err_autopm_put;
+	error = __pegasus_open(pegasus);
+	if (error) {
+		usb_autopm_put_interface(pegasus->intf);
+		return error;
 	}
 
-	error = pegasus_set_mode(pegasus, PEN_MODE_XY, NOTETAKER_LED_MOUSE);
-	if (error)
-		goto err_kill_urb;
-
 	return 0;
-
-err_kill_urb:
-	usb_kill_urb(pegasus->irq);
-	cancel_work_sync(&pegasus->init);
-err_autopm_put:
-	usb_autopm_put_interface(pegasus->intf);
-	return error;
 }
 
 static void pegasus_close(struct input_dev *dev)
 {
 	struct pegasus *pegasus = input_get_drvdata(dev);
 
-	usb_kill_urb(pegasus->irq);
-	cancel_work_sync(&pegasus->init);
+	scoped_guard(mutex, &pegasus->pm_mutex) {
+		usb_kill_urb(pegasus->irq);
+		cancel_work_sync(&pegasus->init);
+
+		pegasus->is_open = false;
+	}
+
 	usb_autopm_put_interface(pegasus->intf);
 }
 
@@ -260,26 +283,40 @@ static int pegasus_probe(struct usb_interface *intf,
 		return -ENODEV;
 
 	/* Sanity check that the device has an endpoint */
-	if (intf->altsetting[0].desc.bNumEndpoints < 1) {
+	if (intf->cur_altsetting->desc.bNumEndpoints < 1) {
 		dev_err(&intf->dev, "Invalid number of endpoints\n");
 		return -EINVAL;
 	}
 
 	endpoint = &intf->cur_altsetting->endpoint[0].desc;
 
-	pegasus = kzalloc(sizeof(*pegasus), GFP_KERNEL);
+	pegasus = kzalloc_obj(*pegasus);
 	input_dev = input_allocate_device();
 	if (!pegasus || !input_dev) {
 		error = -ENOMEM;
 		goto err_free_mem;
 	}
 
+	mutex_init(&pegasus->pm_mutex);
+
 	pegasus->usbdev = dev;
 	pegasus->dev = input_dev;
 	pegasus->intf = intf;
 
 	pipe = usb_rcvintpipe(dev, endpoint->bEndpointAddress);
-	pegasus->data_len = usb_maxpacket(dev, pipe, usb_pipeout(pipe));
+	/* Sanity check that pipe's type matches endpoint's type */
+	if (usb_pipe_type_check(dev, pipe)) {
+		error = -EINVAL;
+		goto err_free_mem;
+	}
+
+	pegasus->data_len = usb_maxpacket(dev, pipe);
+	if (pegasus->data_len < NOTETAKER_PACKET_SIZE) {
+		dev_err(&intf->dev, "packet size is too small (%d)\n",
+			pegasus->data_len);
+		error = -EINVAL;
+		goto err_free_mem;
+	}
 
 	pegasus->data = usb_alloc_coherent(dev, pegasus->data_len, GFP_KERNEL,
 					   &pegasus->data_dma);
@@ -302,7 +339,7 @@ static int pegasus_probe(struct usb_interface *intf,
 	pegasus->irq->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
 
 	if (dev->manufacturer)
-		strlcpy(pegasus->name, dev->manufacturer,
+		strscpy(pegasus->name, dev->manufacturer,
 			sizeof(pegasus->name));
 
 	if (dev->product) {
@@ -388,10 +425,10 @@ static int pegasus_suspend(struct usb_interface *intf, pm_message_t message)
 {
 	struct pegasus *pegasus = usb_get_intfdata(intf);
 
-	mutex_lock(&pegasus->dev->mutex);
+	guard(mutex)(&pegasus->pm_mutex);
+
 	usb_kill_urb(pegasus->irq);
 	cancel_work_sync(&pegasus->init);
-	mutex_unlock(&pegasus->dev->mutex);
 
 	return 0;
 }
@@ -399,31 +436,33 @@ static int pegasus_suspend(struct usb_interface *intf, pm_message_t message)
 static int pegasus_resume(struct usb_interface *intf)
 {
 	struct pegasus *pegasus = usb_get_intfdata(intf);
-	int retval = 0;
 
-	mutex_lock(&pegasus->dev->mutex);
-	if (pegasus->dev->users && usb_submit_urb(pegasus->irq, GFP_NOIO) < 0)
-		retval = -EIO;
-	mutex_unlock(&pegasus->dev->mutex);
+	guard(mutex)(&pegasus->pm_mutex);
 
-	return retval;
+	if (pegasus->is_open && usb_submit_urb(pegasus->irq, GFP_NOIO) < 0)
+		return -EIO;
+
+	return 0;
 }
 
 static int pegasus_reset_resume(struct usb_interface *intf)
 {
 	struct pegasus *pegasus = usb_get_intfdata(intf);
-	int retval = 0;
+	int error;
 
-	mutex_lock(&pegasus->dev->mutex);
-	if (pegasus->dev->users) {
-		retval = pegasus_set_mode(pegasus, PEN_MODE_XY,
+	guard(mutex)(&pegasus->pm_mutex);
+
+	if (pegasus->is_open) {
+		error = pegasus_set_mode(pegasus, PEN_MODE_XY,
 					  NOTETAKER_LED_MOUSE);
-		if (!retval && usb_submit_urb(pegasus->irq, GFP_NOIO) < 0)
-			retval = -EIO;
-	}
-	mutex_unlock(&pegasus->dev->mutex);
+		if (error)
+			return error;
 
-	return retval;
+		if (usb_submit_urb(pegasus->irq, GFP_NOIO) < 0)
+			return -EIO;
+	}
+
+	return 0;
 }
 
 static const struct usb_device_id pegasus_ids[] = {

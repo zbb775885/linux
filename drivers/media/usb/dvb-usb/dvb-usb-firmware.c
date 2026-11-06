@@ -84,13 +84,14 @@ int usb_cypress_load_firmware(struct usb_device *udev, const struct firmware *fw
 }
 EXPORT_SYMBOL(usb_cypress_load_firmware);
 
-int dvb_usb_download_firmware(struct usb_device *udev, struct dvb_usb_device_properties *props)
+int dvb_usb_download_firmware(struct usb_device *udev,
+			      const struct dvb_usb_device_properties *props)
 {
 	int ret;
 	const struct firmware *fw = NULL;
 
 	if ((ret = request_firmware(&fw, props->firmware, &udev->dev)) != 0) {
-		err("did not find the firmware file. (%s) Please see linux/Documentation/dvb/ for more details on firmware-problems. (%d)",
+		err("did not find the firmware file '%s' (status %d). You can use <kernel_dir>/scripts/get_dvb_firmware to get the firmware",
 			props->firmware,ret);
 		return ret;
 	}
@@ -140,6 +141,8 @@ int dvb_usb_get_hexline(const struct firmware *fw, struct hexline *hx,
 
 	if (hx->type == 0x04) {
 		/* b[4] and b[5] are the Extended linear address record data field */
+		if (hx->len != 2)
+			return -EINVAL;
 		hx->addr |= (b[4] << 24) | (b[5] << 16);
 /*		hx->len -= 2;
 		data_offs += 2; */

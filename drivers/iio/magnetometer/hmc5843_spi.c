@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SPI driver for hmc5983
  *
  * Copyright (C) Josef Gajdusek <atx@atx.name>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/module.h>
@@ -58,39 +55,41 @@ static const struct regmap_config hmc5843_spi_regmap_config = {
 static int hmc5843_spi_probe(struct spi_device *spi)
 {
 	int ret;
-	const struct spi_device_id *id = spi_get_device_id(spi);
+	struct regmap *regmap;
 
 	spi->mode = SPI_MODE_3;
 	spi->max_speed_hz = 8000000;
-	spi->bits_per_word = 8;
 	ret = spi_setup(spi);
 	if (ret)
 		return ret;
 
+	regmap = devm_regmap_init_spi(spi, &hmc5843_spi_regmap_config);
+	if (IS_ERR(regmap))
+		return PTR_ERR(regmap);
+
 	return hmc5843_common_probe(&spi->dev,
-			devm_regmap_init_spi(spi, &hmc5843_spi_regmap_config),
-			id->driver_data, id->name);
+			regmap, HMC5983_ID, "hmc5983");
 }
 
-static int hmc5843_spi_remove(struct spi_device *spi)
+static void hmc5843_spi_remove(struct spi_device *spi)
 {
-	return hmc5843_common_remove(&spi->dev);
+	hmc5843_common_remove(&spi->dev);
 }
 
 static const struct spi_device_id hmc5843_id[] = {
-	{ "hmc5983", HMC5983_ID },
+	{ .name = "hmc5983" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, hmc5843_id);
 
 static struct spi_driver hmc5843_driver = {
-		.driver = {
-				.name = "hmc5843",
-				.pm = HMC5843_PM_OPS,
-		},
-		.id_table = hmc5843_id,
-		.probe = hmc5843_spi_probe,
-		.remove = hmc5843_spi_remove,
+	.driver = {
+		.name = "hmc5843",
+		.pm = pm_sleep_ptr(&hmc5843_pm_ops),
+	},
+	.id_table = hmc5843_id,
+	.probe = hmc5843_spi_probe,
+	.remove = hmc5843_spi_remove,
 };
 
 module_spi_driver(hmc5843_driver);
@@ -98,3 +97,4 @@ module_spi_driver(hmc5843_driver);
 MODULE_AUTHOR("Josef Gajdusek <atx@atx.name>");
 MODULE_DESCRIPTION("HMC5983 SPI driver");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("IIO_HMC5843");

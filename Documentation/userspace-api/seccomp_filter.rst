@@ -122,13 +122,18 @@ In precedence order, they are:
 	Results in the lower 16-bits of the return value being passed
 	to userland as the errno without executing the system call.
 
+``SECCOMP_RET_USER_NOTIF``:
+	Results in a ``struct seccomp_notif`` message sent on the userspace
+	notification fd, if it is attached, or ``-ENOSYS`` if it is not. See
+	below on discussion of how to handle user notifications.
+
 ``SECCOMP_RET_TRACE``:
 	When returned, this value will cause the kernel to attempt to
 	notify a ``ptrace()``-based tracer prior to executing the system
 	call.  If there is no tracer present, ``-ENOSYS`` is returned to
 	userland and the system call is not executed.
 
-	A tracer will be notified if it requests ``PTRACE_O_TRACESECCOM``P
+	A tracer will be notified if it requests ``PTRACE_O_TRACESECCOMP``
 	using ``ptrace(PTRACE_SETOPTIONS)``.  The tracer will be notified
 	of a ``PTRACE_EVENT_SECCOMP`` and the ``SECCOMP_RET_DATA`` portion of
 	the BPF program return value will be available to the tracer
@@ -183,6 +188,144 @@ The ``samples/seccomp/`` directory contains both an x86-specific example
 and a more generic example of a higher level macro interface for BPF
 program generation.
 
+Userspace Notification
+======================
+
+The ``SECCOMP_RET_USER_NOTIF`` return code lets seccomp filters pass a
+particular syscall to userspace to be handled. This may be useful for
+applications like container managers, which wish to intercept particular
+syscalls (``mount()``, ``finit_module()``, etc.) and change their behavior.
+
+To acquire a notification FD, use the ``SECCOMP_FILTER_FLAG_NEW_LISTENER``
+argument to the ``seccomp()`` syscall:
+
+.. code-block:: c
+
+    fd = seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, &prog);
+
+which (on success) will return a listener fd for the filter, which can then be
+passed around via ``SCM_RIGHTS`` or similar. Note that filter fds correspond to
+a particular filter, and not a particular task. So if this task then forks,
+notifications from both tasks will appear on the same filter fd. Reads and
+writes to/from a filter fd are also synchronized, so a filter fd can safely
+have many readers.
+
+The interface for a seccomp notification fd consists of two structures:
+
+.. code-block:: c
+
+    struct seccomp_notif_sizes {
+        __u16 seccomp_notif;
+        __u16 seccomp_notif_resp;
+        __u16 seccomp_data;
+    };
+
+    struct seccomp_notif {
+        __u64 id;
+        __u32 pid;
+        __u32 flags;
+        struct seccomp_data data;
+    };
+
+    struct seccomp_notif_resp {
+        __u64 id;
+        __s64 val;
+        __s32 error;
+        __u32 flags;
+    };
+
+The ``struct seccomp_notif_sizes`` structure can be used to determine the size
+of the various structures used in seccomp notifications. The size of ``struct
+seccomp_data`` may change in the future, so code should use:
+
+.. code-block:: c
+
+    struct seccomp_notif_sizes sizes;
+    seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &sizes);
+
+to determine the size of the various structures to allocate. See
+samples/seccomp/user-trap.c for an example.
+
+Users can read via ``ioctl(SECCOMP_IOCTL_NOTIF_RECV)``  (or ``poll()``) on a
+seccomp notification fd to receive a ``struct seccomp_notif``, which contains
+five members: the input length of the structure, a unique-per-filter ``id``,
+the ``pid`` of the task which triggered this request (which may be 0 if the
+task is in a pid ns not visible from the listener's pid namespace). The
+notification also contains the ``data`` passed to seccomp, and a filters flag.
+The structure should be zeroed out prior to calling the ioctl.
+
+Userspace can then make a decision based on this information about what to do,
+and ``ioctl(SECCOMP_IOCTL_NOTIF_SEND)`` a response, indicating what should be
+returned to userspace. The ``id`` member of ``struct seccomp_notif_resp`` should
+be the same ``id`` as in ``struct seccomp_notif``.
+
+Userspace can also add file descriptors to the notifying process via
+``ioctl(SECCOMP_IOCTL_NOTIF_ADDFD)``. The ``id`` member of
+``struct seccomp_notif_addfd`` should be the same ``id`` as in
+``struct seccomp_notif``. The ``newfd_flags`` flag may be used to set flags
+like O_CLOEXEC on the file descriptor in the notifying process. If the supervisor
+wants to inject the file descriptor with a specific number, the
+``SECCOMP_ADDFD_FLAG_SETFD`` flag can be used, and set the ``newfd`` member to
+the specific number to use. If that file descriptor is already open in the
+notifying process it will be replaced. The supervisor can also add an FD, and
+respond atomically by using the ``SECCOMP_ADDFD_FLAG_SEND`` flag and the return
+value will be the injected file descriptor number.
+
+The notifying process can be preempted, resulting in the notification being
+aborted. This can be problematic when trying to take actions on behalf of the
+notifying process that are long-running and typically retryable (mounting a
+filesystem). Alternatively, at filter installation time, the
+``SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV`` flag can be set. This flag makes it
+such that when a user notification is received by the supervisor, the notifying
+process will ignore non-fatal signals until the response is sent. Signals that
+are sent prior to the notification being received by userspace are handled
+normally.
+
+``SECCOMP_FILTER_FLAG_RESTART_BEFORE_RECV`` can be set at filter installation
+to restart a syscall interrupted while its notification is still awaiting
+receipt, even if the signal handler was installed without ``SA_RESTART``.
+The handler runs, and if it returns normally, syscall entry and the seccomp
+filter are evaluated again. The abandoned notification is removed; a new
+notification is queued if the filter again returns ``SECCOMP_RET_USER_NOTIF``.
+This avoids returning ``EINTR`` before the syscall has executed, including
+for calls such as ``close`` where callers do not retry on ``EINTR``.
+A failed notification receive that resets the notification to its initial
+state is also eligible for restart.
+
+Each restart withdraws the pending notification, so a supervisor woken by
+``poll()``, or blocked in ``ioctl(SECCOMP_IOCTL_NOTIF_RECV)``, may find
+nothing left to receive, and the ioctl then fails with ``ENOENT``. This
+already happens whenever a notifying process is interrupted before receipt,
+but with this flag it becomes routine under repeated signals. Supervisors
+should treat ``ENOENT`` from ``SECCOMP_IOCTL_NOTIF_RECV`` as a reason to wait
+again, not as an error.
+
+The flag requires ``SECCOMP_FILTER_FLAG_NEW_LISTENER`` and can be used with
+or without ``SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV``. Using both flags allows
+handlers to run before receipt and defers non-fatal signals during supervisor
+processing after receipt. Without ``SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV``,
+interruptions after receipt retain the existing ``SA_RESTART`` behavior.
+Fatal signals still terminate the notifying process. Neither flag changes
+supervisor-supplied errors or the native syscall's restart behavior after a
+``SECCOMP_USER_NOTIF_FLAG_CONTINUE`` response.
+
+Unconditional restart before receipt is opt-in: a normally returning signal
+handler can no longer cancel that wait with ``EINTR``. Native syscall timeout
+and signal-mask handling have not started during mediation. Repeated signals
+can therefore extend elapsed time and, as restarted notifications join the
+tail of the queue, delay receipt indefinitely. Handlers can also modify memory
+referenced by syscall arguments, so the restarted call must be authorized
+afresh; this flag does not provide an argument snapshot or prevent TOCTOU.
+Existing behavior is unchanged when the flag is absent.
+
+It is worth noting that ``struct seccomp_data`` contains the values of register
+arguments to the syscall, but does not contain pointers to memory. The task's
+memory is accessible to suitably privileged traces via ``ptrace()`` or
+``/proc/pid/mem``. However, care should be taken to avoid the TOCTOU mentioned
+above in this document: all arguments being read from the tracee's memory
+should be read into the tracer's memory before any policy decisions are made.
+This allows for an atomic decision on syscall arguments.
+
 Sysctls
 =======
 
@@ -206,13 +349,6 @@ directory. Here's a description of each file in that directory:
 	``SECCOMP_RET_*`` macros above) that are allowed to be logged. Writes
 	to the file do not need to be in ordered form but reads from the file
 	will be ordered in the same way as the actions_avail sysctl.
-
-	It is important to note that the value of ``actions_logged`` does not
-	prevent certain actions from being logged when the audit subsystem is
-	configured to audit a task. If the action is not found in
-	``actions_logged`` list, the final decision on whether to audit the
-	action for that task is ultimately left up to the audit subsystem to
-	decide for all seccomp return values other than ``SECCOMP_RET_ALLOW``.
 
 	The ``allow`` string is not accepted in the ``actions_logged`` sysctl
 	as it is not possible to log ``SECCOMP_RET_ALLOW`` actions. Attempting

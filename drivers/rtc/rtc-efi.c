@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * rtc-efi: RTC Class Driver for EFI-based systems
  *
@@ -5,12 +6,6 @@
  *
  * Author: dann frazier <dannf@dannf.org>
  * Based on efirtc.c by Stephane Eranian
- *
- *  This program is free software; you can redistribute  it and/or modify it
- *  under  the terms of  the GNU General  Public License as published by the
- *  Free Software Foundation;  either version 2 of the  License, or (at your
- *  option) any later version.
- *
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -57,6 +52,7 @@ compute_wday(efi_time_t *eft, int yday)
 static void
 convert_to_efi_time(struct rtc_time *wtime, efi_time_t *eft)
 {
+	memset(eft, 0, sizeof(*eft));
 	eft->year	= wtime->tm_year + 1900;
 	eft->month	= wtime->tm_mon + 1;
 	eft->day	= wtime->tm_mday;
@@ -122,12 +118,9 @@ static int efi_read_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	efi_time_t eft;
 	efi_status_t status;
 
-	/*
-	 * As of EFI v1.10, this call always returns an unsupported status
-	 */
+	memset(&eft, 0, sizeof(eft));
 	status = efi.get_wakeup_time((efi_bool_t *)&wkalrm->enabled,
 				     (efi_bool_t *)&wkalrm->pending, &eft);
-
 	if (status != EFI_SUCCESS)
 		return -EINVAL;
 
@@ -144,17 +137,7 @@ static int efi_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 
 	convert_to_efi_time(&wkalrm->time, &eft);
 
-	/*
-	 * XXX Fixme:
-	 * As of EFI 0.92 with the firmware I have on my
-	 * machine this call does not seem to work quite
-	 * right
-	 *
-	 * As of v1.10, this call always returns an unsupported status
-	 */
-	status = efi.set_wakeup_time((efi_bool_t)wkalrm->enabled, &eft);
-
-	dev_warn(dev, "write status is %d\n", (int)status);
+	status = efi.set_wakeup_time((efi_bool_t)!!wkalrm->enabled, &eft);
 
 	return status == EFI_SUCCESS ? 0 : -EINVAL;
 }
@@ -169,14 +152,14 @@ static int efi_read_time(struct device *dev, struct rtc_time *tm)
 
 	if (status != EFI_SUCCESS) {
 		/* should never happen */
-		dev_err(dev, "can't read time\n");
+		dev_err_once(dev, "can't read time\n");
 		return -EINVAL;
 	}
 
 	if (!convert_from_efi_time(&eft, tm))
 		return -EIO;
 
-	return rtc_valid_tm(tm);
+	return 0;
 }
 
 static int efi_set_time(struct device *dev, struct rtc_time *tm)
@@ -193,16 +176,21 @@ static int efi_set_time(struct device *dev, struct rtc_time *tm)
 
 static int efi_procfs(struct device *dev, struct seq_file *seq)
 {
-	efi_time_t      eft, alm;
-	efi_time_cap_t  cap;
-	efi_bool_t      enabled, pending;
+	efi_time_t        eft, alm;
+	efi_time_cap_t    cap;
+	efi_bool_t        enabled, pending;
+	struct rtc_device *rtc = dev_get_drvdata(dev);
 
 	memset(&eft, 0, sizeof(eft));
 	memset(&alm, 0, sizeof(alm));
 	memset(&cap, 0, sizeof(cap));
 
 	efi.get_time(&eft, &cap);
-	efi.get_wakeup_time(&enabled, &pending, &alm);
+	if (test_bit(RTC_FEATURE_ALARM, rtc->features) &&
+	    efi.get_wakeup_time(&enabled, &pending, &alm) != EFI_SUCCESS) {
+		enabled = 0;
+		pending = 0;
+	}
 
 	seq_printf(seq,
 		   "Time\t\t: %u:%u:%u.%09u\n"
@@ -218,23 +206,24 @@ static int efi_procfs(struct device *dev, struct seq_file *seq)
 		/* XXX fixme: convert to string? */
 		seq_printf(seq, "Timezone\t: %u\n", eft.timezone);
 
-	seq_printf(seq,
-		   "Alarm Time\t: %u:%u:%u.%09u\n"
-		   "Alarm Date\t: %u-%u-%u\n"
-		   "Alarm Daylight\t: %u\n"
-		   "Enabled\t\t: %s\n"
-		   "Pending\t\t: %s\n",
-		   alm.hour, alm.minute, alm.second, alm.nanosecond,
-		   alm.year, alm.month, alm.day,
-		   alm.daylight,
-		   enabled == 1 ? "yes" : "no",
-		   pending == 1 ? "yes" : "no");
+	if (test_bit(RTC_FEATURE_ALARM, rtc->features)) {
+		seq_printf(seq,
+			   "Alarm Time\t: %u:%u:%u.%09u\n"
+			   "Alarm Date\t: %u-%u-%u\n"
+			   "Alarm Daylight\t: %u\n"
+			   "Enabled\t\t: %s\n"
+			   "Pending\t\t: %s\n",
+			   alm.hour, alm.minute, alm.second, alm.nanosecond,
+			   alm.year, alm.month, alm.day,
+			   alm.daylight,
+			   enabled == 1 ? "yes" : "no",
+			   pending == 1 ? "yes" : "no");
 
-	if (eft.timezone == EFI_UNSPECIFIED_TIMEZONE)
-		seq_puts(seq, "Timezone\t: unspecified\n");
-	else
-		/* XXX fixme: convert to string? */
-		seq_printf(seq, "Timezone\t: %u\n", alm.timezone);
+		if (alm.timezone == EFI_UNSPECIFIED_TIMEZONE)
+			seq_puts(seq, "Alarm Timezone\t: unspecified\n");
+		else
+			seq_printf(seq, "Alarm Timezone\t: %d\n", alm.timezone);
+	}
 
 	/*
 	 * now prints the capabilities
@@ -261,20 +250,40 @@ static int __init efi_rtc_probe(struct platform_device *dev)
 	struct rtc_device *rtc;
 	efi_time_t eft;
 	efi_time_cap_t cap;
+	efi_bool_t enabled, pending;
 
 	/* First check if the RTC is usable */
 	if (efi.get_time(&eft, &cap) != EFI_SUCCESS)
 		return -ENODEV;
 
-	rtc = devm_rtc_device_register(&dev->dev, "rtc-efi", &efi_rtc_ops,
-					THIS_MODULE);
+	rtc = devm_rtc_allocate_device(&dev->dev);
 	if (IS_ERR(rtc))
 		return PTR_ERR(rtc);
 
-	rtc->uie_unsupported = 1;
 	platform_set_drvdata(dev, rtc);
 
-	return 0;
+	rtc->ops = &efi_rtc_ops;
+	clear_bit(RTC_FEATURE_UPDATE_INTERRUPT, rtc->features);
+
+	/*
+	 * The EFI_RT_SUPPORTED_WAKEUP_SERVICES bit defaults to enabled
+	 * and only gets cleared when the RT_PROP table explicitly says
+	 * wakeup is unsupported. Many platforms lack an RT_PROP table
+	 * even though they don't implement the wakeup runtime service,
+	 * so probe by actually calling GetWakeupTime() to avoid exposing
+	 * a broken alarm to userspace.
+	 */
+	if (efi_rt_services_supported(EFI_RT_SUPPORTED_WAKEUP_SERVICES) &&
+	    efi.get_wakeup_time(&enabled, &pending, &eft) == EFI_SUCCESS) {
+		set_bit(RTC_FEATURE_ALARM, rtc->features);
+		set_bit(RTC_FEATURE_ALARM_WAKEUP_ONLY, rtc->features);
+	} else {
+		clear_bit(RTC_FEATURE_ALARM, rtc->features);
+	}
+
+	device_init_wakeup(&dev->dev, true);
+
+	return devm_rtc_register_device(rtc);
 }
 
 static struct platform_driver efi_rtc_driver = {
@@ -285,7 +294,6 @@ static struct platform_driver efi_rtc_driver = {
 
 module_platform_driver_probe(efi_rtc_driver, efi_rtc_probe);
 
-MODULE_ALIAS("platform:rtc-efi");
 MODULE_AUTHOR("dann frazier <dannf@dannf.org>");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("EFI RTC driver");

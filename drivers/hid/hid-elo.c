@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HID driver for ELO usb touchscreen 4000/4500
  *
  * Copyright (c) 2013 Jiri Slaby
  *
  * Data parsing taken from elousb driver by Vojtech Pavlik.
- *
- * This driver is licensed under the terms of GPLv2.
  */
 
 #include <linux/hid.h>
@@ -84,6 +83,9 @@ static int elo_raw_event(struct hid_device *hdev, struct hid_report *report,
 	struct hid_input *hidinput;
 
 	if (!(hdev->claimed & HID_CLAIMED_INPUT) || list_empty(&hdev->inputs))
+		return 0;
+
+	if (size < ELO_SMARTSET_PACKET_SIZE)
 		return 0;
 
 	hidinput = list_first_entry(&hdev->inputs, struct hid_input, list);
@@ -230,7 +232,10 @@ static int elo_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	struct elo_priv *priv;
 	int ret;
 
-	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (!hid_is_usb(hdev))
+		return -EINVAL;
+
+	priv = kzalloc_obj(*priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -311,4 +316,5 @@ static void __exit elo_driver_exit(void)
 module_exit(elo_driver_exit);
 
 MODULE_AUTHOR("Jiri Slaby <jslaby@suse.cz>");
+MODULE_DESCRIPTION("HID driver for ELO usb touchscreen 4000/4500");
 MODULE_LICENSE("GPL");

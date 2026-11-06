@@ -38,7 +38,7 @@
 #include <linux/utsname.h>
 #include <scsi/scsi_device.h>
 #include <scsi/scsi_transport_fc.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <scsi/fc/fc_els.h>
 #include <scsi/fc/fc_fs.h>
 #include <scsi/fc/fc_gs.h>
@@ -301,6 +301,7 @@ csio_ln_fdmi_rhba_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 	struct fc_fdmi_port_name *port_name;
 	uint8_t buf[64];
 	uint8_t *fc4_type;
+	unsigned long flags;
 
 	if (fdmi_req->wr_status != FW_SUCCESS) {
 		csio_ln_dbg(ln, "WR error:%x in processing fdmi rhba cmd\n",
@@ -352,6 +353,14 @@ csio_ln_fdmi_rhba_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 		val = htonl(FC_PORTSPEED_1GBIT);
 	else if (hw->pport[ln->portid].link_speed == FW_PORT_CAP_SPEED_10G)
 		val = htonl(FC_PORTSPEED_10GBIT);
+	else if (hw->pport[ln->portid].link_speed == FW_PORT_CAP32_SPEED_25G)
+		val = htonl(FC_PORTSPEED_25GBIT);
+	else if (hw->pport[ln->portid].link_speed == FW_PORT_CAP32_SPEED_40G)
+		val = htonl(FC_PORTSPEED_40GBIT);
+	else if (hw->pport[ln->portid].link_speed == FW_PORT_CAP32_SPEED_50G)
+		val = htonl(FC_PORTSPEED_50GBIT);
+	else if (hw->pport[ln->portid].link_speed == FW_PORT_CAP32_SPEED_100G)
+		val = htonl(FC_PORTSPEED_100GBIT);
 	else
 		val = htonl(CSIO_HBA_PORTSPEED_UNKNOWN);
 	csio_append_attrib(&pld, FC_FDMI_PORT_ATTR_CURRENTPORTSPEED,
@@ -377,13 +386,13 @@ csio_ln_fdmi_rhba_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 	len = (uint32_t)(pld - (uint8_t *)cmd);
 
 	/* Submit FDMI RPA request */
-	spin_lock_irq(&hw->lock);
+	spin_lock_irqsave(&hw->lock, flags);
 	if (csio_ln_mgmt_submit_req(fdmi_req, csio_ln_fdmi_done,
 				FCOE_CT, &fdmi_req->dma_buf, len)) {
 		CSIO_INC_STATS(ln, n_fdmi_err);
 		csio_ln_dbg(ln, "Failed to issue fdmi rpa req\n");
 	}
-	spin_unlock_irq(&hw->lock);
+	spin_unlock_irqrestore(&hw->lock, flags);
 }
 
 /*
@@ -404,6 +413,7 @@ csio_ln_fdmi_dprt_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 	struct fc_fdmi_rpl *reg_pl;
 	struct fs_fdmi_attrs *attrib_blk;
 	uint8_t buf[64];
+	unsigned long flags;
 
 	if (fdmi_req->wr_status != FW_SUCCESS) {
 		csio_ln_dbg(ln, "WR error:%x in processing fdmi dprt cmd\n",
@@ -483,13 +493,13 @@ csio_ln_fdmi_dprt_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 	attrib_blk->numattrs = htonl(numattrs);
 
 	/* Submit FDMI RHBA request */
-	spin_lock_irq(&hw->lock);
+	spin_lock_irqsave(&hw->lock, flags);
 	if (csio_ln_mgmt_submit_req(fdmi_req, csio_ln_fdmi_rhba_cbfn,
 				FCOE_CT, &fdmi_req->dma_buf, len)) {
 		CSIO_INC_STATS(ln, n_fdmi_err);
 		csio_ln_dbg(ln, "Failed to issue fdmi rhba req\n");
 	}
-	spin_unlock_irq(&hw->lock);
+	spin_unlock_irqrestore(&hw->lock, flags);
 }
 
 /*
@@ -504,6 +514,7 @@ csio_ln_fdmi_dhba_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 	void *cmd;
 	struct fc_fdmi_port_name *port_name;
 	uint32_t len;
+	unsigned long flags;
 
 	if (fdmi_req->wr_status != FW_SUCCESS) {
 		csio_ln_dbg(ln, "WR error:%x in processing fdmi dhba cmd\n",
@@ -534,13 +545,13 @@ csio_ln_fdmi_dhba_cbfn(struct csio_hw *hw, struct csio_ioreq *fdmi_req)
 	len += sizeof(*port_name);
 
 	/* Submit FDMI request */
-	spin_lock_irq(&hw->lock);
+	spin_lock_irqsave(&hw->lock, flags);
 	if (csio_ln_mgmt_submit_req(fdmi_req, csio_ln_fdmi_dprt_cbfn,
 				FCOE_CT, &fdmi_req->dma_buf, len)) {
 		CSIO_INC_STATS(ln, n_fdmi_err);
 		csio_ln_dbg(ln, "Failed to issue fdmi dprt req\n");
 	}
-	spin_unlock_irq(&hw->lock);
+	spin_unlock_irqrestore(&hw->lock, flags);
 }
 
 /**
@@ -608,7 +619,7 @@ csio_ln_vnp_read_cbfn(struct csio_hw *hw, struct csio_mb *mbp)
 	struct fc_els_csp *csp;
 	struct fc_els_cssp *clsp;
 	enum fw_retval retval;
-	__be32 nport_id;
+	__be32 nport_id = 0;
 
 	retval = FW_CMD_RETVAL_G(ntohl(rsp->alloc_to_len16));
 	if (retval != FW_SUCCESS) {
@@ -861,6 +872,7 @@ csio_ln_read_fcf_entry(struct csio_lnode *ln,
 static void
 csio_handle_link_up(struct csio_hw *hw, uint8_t portid, uint32_t fcfi,
 		    uint32_t vnpi)
+	__must_hold(&hw->lock)
 {
 	struct csio_lnode *ln = NULL;
 
@@ -1084,7 +1096,7 @@ csio_handle_link_down(struct csio_hw *hw, uint8_t portid, uint32_t fcfi,
 int
 csio_is_lnode_ready(struct csio_lnode *ln)
 {
-	return (csio_get_state(ln) == ((csio_sm_state_t)csio_lns_ready));
+	return (csio_get_state(ln) == csio_lns_ready);
 }
 
 /*****************************************************************************/
@@ -1154,6 +1166,7 @@ csio_lns_uninit(struct csio_lnode *ln, enum csio_ln_ev evt)
  */
 static void
 csio_lns_online(struct csio_lnode *ln, enum csio_ln_ev evt)
+	__must_hold(&csio_lnode_to_hw(ln)->lock)
 {
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
 
@@ -1176,7 +1189,6 @@ csio_lns_online(struct csio_lnode *ln, enum csio_ln_ev evt)
 		break;
 
 	case CSIO_LNE_LINK_DOWN:
-		/* Fall through */
 	case CSIO_LNE_DOWN_LINK:
 		csio_set_state(&ln->sm, csio_lns_uninit);
 		if (csio_is_phys_ln(ln)) {
@@ -1206,6 +1218,7 @@ csio_lns_online(struct csio_lnode *ln, enum csio_ln_ev evt)
  */
 static void
 csio_lns_ready(struct csio_lnode *ln, enum csio_ln_ev evt)
+	__must_hold(&csio_lnode_to_hw(ln)->lock)
 {
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
 
@@ -1356,15 +1369,15 @@ csio_free_fcfinfo(struct kref *kref)
 void
 csio_lnode_state_to_str(struct csio_lnode *ln, int8_t *str)
 {
-	if (csio_get_state(ln) == ((csio_sm_state_t)csio_lns_uninit)) {
+	if (csio_get_state(ln) == csio_lns_uninit) {
 		strcpy(str, "UNINIT");
 		return;
 	}
-	if (csio_get_state(ln) == ((csio_sm_state_t)csio_lns_ready)) {
+	if (csio_get_state(ln) == csio_lns_ready) {
 		strcpy(str, "READY");
 		return;
 	}
-	if (csio_get_state(ln) == ((csio_sm_state_t)csio_lns_offline)) {
+	if (csio_get_state(ln) == csio_lns_offline) {
 		strcpy(str, "OFFLINE");
 		return;
 	}
@@ -1827,7 +1840,7 @@ csio_ln_fdmi_init(struct csio_lnode *ln)
 	struct csio_dma_buf	*dma_buf;
 
 	/* Allocate MGMT request required for FDMI */
-	ln->mgmt_req = kzalloc(sizeof(struct csio_ioreq), GFP_KERNEL);
+	ln->mgmt_req = kzalloc_obj(struct csio_ioreq);
 	if (!ln->mgmt_req) {
 		csio_ln_err(ln, "Failed to alloc ioreq for FDMI\n");
 		CSIO_INC_STATS(hw, n_err_nomem);
@@ -1837,8 +1850,8 @@ csio_ln_fdmi_init(struct csio_lnode *ln)
 	/* Allocate Dma buffers for FDMI response Payload */
 	dma_buf = &ln->mgmt_req->dma_buf;
 	dma_buf->len = 2048;
-	dma_buf->vaddr = pci_alloc_consistent(hw->pdev, dma_buf->len,
-						&dma_buf->paddr);
+	dma_buf->vaddr = dma_alloc_coherent(&hw->pdev->dev, dma_buf->len,
+						&dma_buf->paddr, GFP_KERNEL);
 	if (!dma_buf->vaddr) {
 		csio_err(hw, "Failed to alloc DMA buffer for FDMI!\n");
 		kfree(ln->mgmt_req);
@@ -1865,7 +1878,7 @@ csio_ln_fdmi_exit(struct csio_lnode *ln)
 
 	dma_buf = &ln->mgmt_req->dma_buf;
 	if (dma_buf->vaddr)
-		pci_free_consistent(hw->pdev, dma_buf->len, dma_buf->vaddr,
+		dma_free_coherent(&hw->pdev->dev, dma_buf->len, dma_buf->vaddr,
 				    dma_buf->paddr);
 
 	kfree(ln->mgmt_req);
@@ -1981,7 +1994,7 @@ static int
 csio_ln_init(struct csio_lnode *ln)
 {
 	int rv = -EINVAL;
-	struct csio_lnode *rln, *pln;
+	struct csio_lnode *pln;
 	struct csio_hw *hw = csio_lnode_to_hw(ln);
 
 	csio_init_state(&ln->sm, csio_lns_uninit);
@@ -1992,7 +2005,7 @@ csio_ln_init(struct csio_lnode *ln)
 
 		/* This is the lnode used during initialization */
 
-		ln->fcfinfo = kzalloc(sizeof(struct csio_fcf_info), GFP_KERNEL);
+		ln->fcfinfo = kzalloc_obj(struct csio_fcf_info);
 		if (!ln->fcfinfo) {
 			csio_ln_err(ln, "Failed to alloc FCF record\n");
 			CSIO_INC_STATS(hw, n_err_nomem);
@@ -2011,7 +2024,6 @@ csio_ln_init(struct csio_lnode *ln)
 		 * THe rest is common for non-root physical and NPIV lnodes.
 		 * Just get references to all other modules
 		 */
-		rln = csio_root_lnode(ln);
 
 		if (csio_is_npiv_ln(ln)) {
 			/* NPIV */
@@ -2020,8 +2032,7 @@ csio_ln_init(struct csio_lnode *ln)
 			ln->fcfinfo = pln->fcfinfo;
 		} else {
 			/* Another non-root physical lnode (FCF) */
-			ln->fcfinfo = kzalloc(sizeof(struct csio_fcf_info),
-								GFP_KERNEL);
+			ln->fcfinfo = kzalloc_obj(struct csio_fcf_info);
 			if (!ln->fcfinfo) {
 				csio_ln_err(ln, "Failed to alloc FCF info\n");
 				CSIO_INC_STATS(hw, n_err_nomem);
@@ -2058,10 +2069,9 @@ csio_ln_exit(struct csio_lnode *ln)
 	ln->fcfinfo = NULL;
 }
 
-/**
+/*
  * csio_lnode_init - Initialize the members of an lnode.
  * @ln:		lnode
- *
  */
 int
 csio_lnode_init(struct csio_lnode *ln, struct csio_hw *hw,

@@ -1,18 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * es8328.c  --  ES8328 ALSA SoC Audio driver
  *
  * Copyright 2014 Sutajio Ko-Usagi PTE LTD
  *
  * Author: Sean Cross <xobs@kosagi.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/clk.h>
 #include <linux/delay.h>
-#include <linux/of_device.h>
 #include <linux/module.h>
 #include <linux/pm.h>
 #include <linux/regmap.h>
@@ -87,7 +83,7 @@ struct es8328_priv {
 	int mclkdiv2;
 	const struct snd_pcm_hw_constraint_list *sysclk_constraints;
 	const int *mclk_ratios;
-	bool master;
+	bool provider;
 	struct regulator_bulk_data supplies[ES8328_SUPPLY_NUM];
 };
 
@@ -102,7 +98,6 @@ static SOC_ENUM_SINGLE_DECL(adcpol,
 
 static const DECLARE_TLV_DB_SCALE(play_tlv, -3000, 100, 0);
 static const DECLARE_TLV_DB_SCALE(dac_adc_tlv, -9600, 50, 0);
-static const DECLARE_TLV_DB_SCALE(pga_tlv, 0, 300, 0);
 static const DECLARE_TLV_DB_SCALE(bypass_tlv, -1500, 300, 0);
 static const DECLARE_TLV_DB_SCALE(mic_tlv, 0, 300, 0);
 
@@ -116,9 +111,9 @@ static const struct {
 	{ 48000, ES8328_DACCONTROL6_DEEMPH_48k },
 };
 
-static int es8328_set_deemph(struct snd_soc_codec *codec)
+static int es8328_set_deemph(struct snd_soc_component *component)
 {
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
 	int val, i, best;
 
 	/*
@@ -138,17 +133,17 @@ static int es8328_set_deemph(struct snd_soc_codec *codec)
 		val = ES8328_DACCONTROL6_DEEMPH_OFF;
 	}
 
-	dev_dbg(codec->dev, "Set deemphasis %d\n", val);
+	dev_dbg(component->dev, "Set deemphasis %d\n", val);
 
-	return snd_soc_update_bits(codec, ES8328_DACCONTROL6,
+	return snd_soc_component_update_bits(component, ES8328_DACCONTROL6,
 			ES8328_DACCONTROL6_DEEMPH_MASK, val);
 }
 
 static int es8328_get_deemph(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
 
 	ucontrol->value.integer.value[0] = es8328->deemph;
 	return 0;
@@ -157,21 +152,23 @@ static int es8328_get_deemph(struct snd_kcontrol *kcontrol,
 static int es8328_put_deemph(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
 	unsigned int deemph = ucontrol->value.integer.value[0];
 	int ret;
 
 	if (deemph > 1)
 		return -EINVAL;
 
-	ret = es8328_set_deemph(codec);
+	if (es8328->deemph == deemph)
+		return 0;
+
+	es8328->deemph = deemph;
+	ret = es8328_set_deemph(component);
 	if (ret < 0)
 		return ret;
 
-	es8328->deemph = deemph;
-
-	return 0;
+	return 1;
 }
 
 
@@ -231,11 +228,10 @@ static const struct soc_enum es8328_rline_enum =
 			      ARRAY_SIZE(es8328_line_texts),
 			      es8328_line_texts);
 static const struct snd_kcontrol_new es8328_right_line_controls =
-	SOC_DAPM_ENUM("Route", es8328_lline_enum);
+	SOC_DAPM_ENUM("Route", es8328_rline_enum);
 
 /* Left Mixer */
 static const struct snd_kcontrol_new es8328_left_mixer_controls[] = {
-	SOC_DAPM_SINGLE("Playback Switch", ES8328_DACCONTROL17, 7, 1, 0),
 	SOC_DAPM_SINGLE("Left Bypass Switch", ES8328_DACCONTROL17, 6, 1, 0),
 	SOC_DAPM_SINGLE("Right Playback Switch", ES8328_DACCONTROL18, 7, 1, 0),
 	SOC_DAPM_SINGLE("Right Bypass Switch", ES8328_DACCONTROL18, 6, 1, 0),
@@ -245,7 +241,6 @@ static const struct snd_kcontrol_new es8328_left_mixer_controls[] = {
 static const struct snd_kcontrol_new es8328_right_mixer_controls[] = {
 	SOC_DAPM_SINGLE("Left Playback Switch", ES8328_DACCONTROL19, 7, 1, 0),
 	SOC_DAPM_SINGLE("Left Bypass Switch", ES8328_DACCONTROL19, 6, 1, 0),
-	SOC_DAPM_SINGLE("Playback Switch", ES8328_DACCONTROL20, 7, 1, 0),
 	SOC_DAPM_SINGLE("Right Bypass Switch", ES8328_DACCONTROL20, 6, 1, 0),
 };
 
@@ -338,10 +333,10 @@ static const struct snd_soc_dapm_widget es8328_dapm_widgets[] = {
 	SND_SOC_DAPM_DAC("Left DAC", "Left Playback", ES8328_DACPOWER,
 			ES8328_DACPOWER_LDAC_OFF, 1),
 
-	SND_SOC_DAPM_MIXER("Left Mixer", SND_SOC_NOPM, 0, 0,
+	SND_SOC_DAPM_MIXER("Left Mixer", ES8328_DACCONTROL17, 7, 0,
 		&es8328_left_mixer_controls[0],
 		ARRAY_SIZE(es8328_left_mixer_controls)),
-	SND_SOC_DAPM_MIXER("Right Mixer", SND_SOC_NOPM, 0, 0,
+	SND_SOC_DAPM_MIXER("Right Mixer", ES8328_DACCONTROL20, 7, 0,
 		&es8328_right_mixer_controls[0],
 		ARRAY_SIZE(es8328_right_mixer_controls)),
 
@@ -410,29 +405,19 @@ static const struct snd_soc_dapm_route es8328_dapm_routes[] = {
 
 	{ "Mic Bias", NULL, "Mic Bias Gen" },
 
-	{ "Left Line Mux", "Line 1", "LINPUT1" },
-	{ "Left Line Mux", "Line 2", "LINPUT2" },
-	{ "Left Line Mux", "PGA", "Left PGA Mux" },
-	{ "Left Line Mux", "Differential", "Differential Mux" },
+	{ "LINPUT1", NULL, "Mic Bias" },
+	{ "RINPUT1", NULL, "Mic Bias" },
+	{ "LINPUT2", NULL, "Mic Bias" },
+	{ "RINPUT2", NULL, "Mic Bias" },
 
-	{ "Right Line Mux", "Line 1", "RINPUT1" },
-	{ "Right Line Mux", "Line 2", "RINPUT2" },
-	{ "Right Line Mux", "PGA", "Right PGA Mux" },
-	{ "Right Line Mux", "Differential", "Differential Mux" },
-
-	{ "Left Out 1", NULL, "Left DAC" },
-	{ "Right Out 1", NULL, "Right DAC" },
-	{ "Left Out 2", NULL, "Left DAC" },
-	{ "Right Out 2", NULL, "Right DAC" },
-
-	{ "Left Mixer", "Playback Switch", "Left DAC" },
+	{ "Left Mixer", NULL, "Left DAC" },
 	{ "Left Mixer", "Left Bypass Switch", "Left Line Mux" },
 	{ "Left Mixer", "Right Playback Switch", "Right DAC" },
 	{ "Left Mixer", "Right Bypass Switch", "Right Line Mux" },
 
 	{ "Right Mixer", "Left Playback Switch", "Left DAC" },
 	{ "Right Mixer", "Left Bypass Switch", "Left Line Mux" },
-	{ "Right Mixer", "Playback Switch", "Right DAC" },
+	{ "Right Mixer", NULL, "Right DAC" },
 	{ "Right Mixer", "Right Bypass Switch", "Right Line Mux" },
 
 	{ "DAC DIG", NULL, "DAC STM" },
@@ -453,9 +438,9 @@ static const struct snd_soc_dapm_route es8328_dapm_routes[] = {
 	{ "ROUT2", NULL, "Right Out 2" },
 };
 
-static int es8328_mute(struct snd_soc_dai *dai, int mute)
+static int es8328_mute(struct snd_soc_dai *dai, int mute, int direction)
 {
-	return snd_soc_update_bits(dai->codec, ES8328_DACCONTROL3,
+	return snd_soc_component_update_bits(dai->component, ES8328_DACCONTROL3,
 			ES8328_DACCONTROL3_DACMUTE,
 			mute ? ES8328_DACCONTROL3_DACMUTE : 0);
 }
@@ -463,10 +448,10 @@ static int es8328_mute(struct snd_soc_dai *dai, int mute)
 static int es8328_startup(struct snd_pcm_substream *substream,
 			  struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
 
-	if (es8328->master && es8328->sysclk_constraints)
+	if (es8328->provider && es8328->sysclk_constraints)
 		snd_pcm_hw_constraint_list(substream->runtime, 0,
 				SNDRV_PCM_HW_PARAM_RATE,
 				es8328->sysclk_constraints);
@@ -478,8 +463,9 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
 	struct snd_pcm_hw_params *params,
 	struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
+	int ret;
 	int i;
 	int reg;
 	int wl;
@@ -490,9 +476,9 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
 	else
 		reg = ES8328_ADCCONTROL5;
 
-	if (es8328->master) {
+	if (es8328->provider) {
 		if (!es8328->sysclk_constraints) {
-			dev_err(codec->dev, "No MCLK configured\n");
+			dev_err(component->dev, "No MCLK configured\n");
 			return -EINVAL;
 		}
 
@@ -502,7 +488,7 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
 				break;
 
 		if (i == es8328->sysclk_constraints->count) {
-			dev_err(codec->dev,
+			dev_err(component->dev,
 				"LRCLK %d unsupported with current clock\n",
 				params_rate(params));
 			return -EINVAL;
@@ -513,9 +499,12 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
 		es8328->mclkdiv2 = 0;
 	}
 
-	snd_soc_update_bits(codec, ES8328_MASTERMODE,
-			ES8328_MASTERMODE_MCLKDIV2,
-			es8328->mclkdiv2 ? ES8328_MASTERMODE_MCLKDIV2 : 0);
+	ret = snd_soc_component_update_bits(component, ES8328_MASTERMODE,
+					    ES8328_MASTERMODE_MCLKDIV2,
+					    es8328->mclkdiv2 ?
+					    ES8328_MASTERMODE_MCLKDIV2 : 0);
+	if (ret < 0)
+		return ret;
 
 	switch (params_width(params)) {
 	case 16:
@@ -538,42 +527,59 @@ static int es8328_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		snd_soc_update_bits(codec, ES8328_DACCONTROL1,
-				ES8328_DACCONTROL1_DACWL_MASK,
-				wl << ES8328_DACCONTROL1_DACWL_SHIFT);
+		ret = snd_soc_component_update_bits(component, ES8328_DACCONTROL1,
+						    ES8328_DACCONTROL1_DACWL_MASK,
+						    wl << ES8328_DACCONTROL1_DACWL_SHIFT);
+		if (ret < 0)
+			return ret;
 
 		es8328->playback_fs = params_rate(params);
-		es8328_set_deemph(codec);
-	} else
-		snd_soc_update_bits(codec, ES8328_ADCCONTROL4,
-				ES8328_ADCCONTROL4_ADCWL_MASK,
-				wl << ES8328_ADCCONTROL4_ADCWL_SHIFT);
+		ret = es8328_set_deemph(component);
+		if (ret < 0)
+			return ret;
+	} else {
+		ret = snd_soc_component_update_bits(component, ES8328_ADCCONTROL4,
+						    ES8328_ADCCONTROL4_ADCWL_MASK,
+						    wl << ES8328_ADCCONTROL4_ADCWL_SHIFT);
+		if (ret < 0)
+			return ret;
+	}
 
-	return snd_soc_update_bits(codec, reg, ES8328_RATEMASK, ratio);
+	ret = snd_soc_component_update_bits(component, reg, ES8328_RATEMASK, ratio);
+	if (ret < 0)
+		return ret;
+	return 0;
 }
 
 static int es8328_set_sysclk(struct snd_soc_dai *codec_dai,
 		int clk_id, unsigned int freq, int dir)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = codec_dai->component;
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
 	int mclkdiv2 = 0;
+	unsigned int round_freq;
 
-	switch (freq) {
+	/*
+	 * Allow a small tolerance for frequencies within 100hz. Note
+	 * this value is chosen arbitrarily.
+	 */
+	round_freq = DIV_ROUND_CLOSEST(freq, 100) * 100;
+
+	switch (round_freq) {
 	case 0:
 		es8328->sysclk_constraints = NULL;
 		es8328->mclk_ratios = NULL;
 		break;
 	case 22579200:
 		mclkdiv2 = 1;
-		/* fallthru */
+		fallthrough;
 	case 11289600:
 		es8328->sysclk_constraints = &constraints_11289;
 		es8328->mclk_ratios = ratios_11289;
 		break;
 	case 24576000:
 		mclkdiv2 = 1;
-		/* fallthru */
+		fallthrough;
 	case 12288000:
 		es8328->sysclk_constraints = &constraints_12288;
 		es8328->mclk_ratios = ratios_12288;
@@ -589,24 +595,29 @@ static int es8328_set_sysclk(struct snd_soc_dai *codec_dai,
 static int es8328_set_dai_fmt(struct snd_soc_dai *codec_dai,
 		unsigned int fmt)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
-	struct es8328_priv *es8328 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = codec_dai->component;
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
+	int ret;
 	u8 dac_mode = 0;
 	u8 adc_mode = 0;
 
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBM_CFM:
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBP_CFP:
 		/* Master serial port mode, with BCLK generated automatically */
-		snd_soc_update_bits(codec, ES8328_MASTERMODE,
-				    ES8328_MASTERMODE_MSC,
-				    ES8328_MASTERMODE_MSC);
-		es8328->master = true;
+		ret = snd_soc_component_update_bits(component, ES8328_MASTERMODE,
+						    ES8328_MASTERMODE_MSC,
+						    ES8328_MASTERMODE_MSC);
+		if (ret < 0)
+			return ret;
+		es8328->provider = true;
 		break;
-	case SND_SOC_DAIFMT_CBS_CFS:
+	case SND_SOC_DAIFMT_CBC_CFC:
 		/* Slave serial port mode */
-		snd_soc_update_bits(codec, ES8328_MASTERMODE,
-				    ES8328_MASTERMODE_MSC, 0);
-		es8328->master = false;
+		ret = snd_soc_component_update_bits(component, ES8328_MASTERMODE,
+						    ES8328_MASTERMODE_MSC, 0);
+		if (ret < 0)
+			return ret;
+		es8328->provider = false;
 		break;
 	default:
 		return -EINVAL;
@@ -634,71 +645,102 @@ static int es8328_set_dai_fmt(struct snd_soc_dai *codec_dai,
 	if ((fmt & SND_SOC_DAIFMT_INV_MASK) != SND_SOC_DAIFMT_NB_NF)
 		return -EINVAL;
 
-	snd_soc_update_bits(codec, ES8328_DACCONTROL1,
-			ES8328_DACCONTROL1_DACFORMAT_MASK, dac_mode);
-	snd_soc_update_bits(codec, ES8328_ADCCONTROL4,
-			ES8328_ADCCONTROL4_ADCFORMAT_MASK, adc_mode);
+	ret = snd_soc_component_update_bits(component, ES8328_DACCONTROL1,
+					    ES8328_DACCONTROL1_DACFORMAT_MASK,
+					    dac_mode);
+	if (ret < 0)
+		return ret;
+
+	ret = snd_soc_component_update_bits(component, ES8328_ADCCONTROL4,
+					    ES8328_ADCCONTROL4_ADCFORMAT_MASK,
+					    adc_mode);
+	if (ret < 0)
+		return ret;
 
 	return 0;
 }
 
-static int es8328_set_bias_level(struct snd_soc_codec *codec,
+static int es8328_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	int ret;
+
 	switch (level) {
 	case SND_SOC_BIAS_ON:
 		break;
 
 	case SND_SOC_BIAS_PREPARE:
 		/* VREF, VMID=2x50k, digital enabled */
-		snd_soc_write(codec, ES8328_CHIPPOWER, 0);
-		snd_soc_update_bits(codec, ES8328_CONTROL1,
-				ES8328_CONTROL1_VMIDSEL_MASK |
-				ES8328_CONTROL1_ENREF,
-				ES8328_CONTROL1_VMIDSEL_50k |
-				ES8328_CONTROL1_ENREF);
+		ret = snd_soc_component_write(component, ES8328_CHIPPOWER, 0);
+		if (ret < 0)
+			return ret;
+
+		ret = snd_soc_component_update_bits(component, ES8328_CONTROL1,
+						    ES8328_CONTROL1_VMIDSEL_MASK |
+						    ES8328_CONTROL1_ENREF,
+						    ES8328_CONTROL1_VMIDSEL_50k |
+						    ES8328_CONTROL1_ENREF);
+		if (ret < 0)
+			return ret;
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_codec_get_bias_level(codec) == SND_SOC_BIAS_OFF) {
-			snd_soc_update_bits(codec, ES8328_CONTROL1,
-					ES8328_CONTROL1_VMIDSEL_MASK |
-					ES8328_CONTROL1_ENREF,
-					ES8328_CONTROL1_VMIDSEL_5k |
-					ES8328_CONTROL1_ENREF);
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
+			ret = snd_soc_component_update_bits(component, ES8328_CONTROL1,
+							    ES8328_CONTROL1_VMIDSEL_MASK |
+							    ES8328_CONTROL1_ENREF,
+							    ES8328_CONTROL1_VMIDSEL_5k |
+							    ES8328_CONTROL1_ENREF);
+			if (ret < 0)
+				return ret;
 
 			/* Charge caps */
 			msleep(100);
 		}
 
-		snd_soc_write(codec, ES8328_CONTROL2,
-				ES8328_CONTROL2_OVERCURRENT_ON |
-				ES8328_CONTROL2_THERMAL_SHUTDOWN_ON);
+		ret = snd_soc_component_write(component, ES8328_CONTROL2,
+					      ES8328_CONTROL2_OVERCURRENT_ON |
+					      ES8328_CONTROL2_THERMAL_SHUTDOWN_ON);
+		if (ret < 0)
+			return ret;
 
 		/* VREF, VMID=2*500k, digital stopped */
-		snd_soc_update_bits(codec, ES8328_CONTROL1,
-				ES8328_CONTROL1_VMIDSEL_MASK |
-				ES8328_CONTROL1_ENREF,
-				ES8328_CONTROL1_VMIDSEL_500k |
-				ES8328_CONTROL1_ENREF);
+		ret = snd_soc_component_update_bits(component, ES8328_CONTROL1,
+						    ES8328_CONTROL1_VMIDSEL_MASK |
+						    ES8328_CONTROL1_ENREF,
+						    ES8328_CONTROL1_VMIDSEL_500k |
+						    ES8328_CONTROL1_ENREF);
+		if (ret < 0)
+			return ret;
 		break;
 
 	case SND_SOC_BIAS_OFF:
-		snd_soc_update_bits(codec, ES8328_CONTROL1,
-				ES8328_CONTROL1_VMIDSEL_MASK |
-				ES8328_CONTROL1_ENREF,
-				0);
+		ret = snd_soc_component_update_bits(component, ES8328_CONTROL1,
+						    ES8328_CONTROL1_VMIDSEL_MASK |
+						    ES8328_CONTROL1_ENREF,
+						    0);
+		if (ret < 0)
+			return ret;
 		break;
 	}
 	return 0;
 }
 
+static const u64 es8328_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J;
+
 static const struct snd_soc_dai_ops es8328_dai_ops = {
 	.startup	= es8328_startup,
 	.hw_params	= es8328_hw_params,
-	.digital_mute	= es8328_mute,
+	.mute_stream	= es8328_mute,
 	.set_sysclk	= es8328_set_sysclk,
 	.set_fmt	= es8328_set_dai_fmt,
+	.auto_selectable_formats	= &es8328_selectable_formats,
+	.num_auto_selectable_formats	= 1,
+	.no_capture_mute = 1,
 };
 
 static struct snd_soc_dai_driver es8328_dai = {
@@ -718,83 +760,78 @@ static struct snd_soc_dai_driver es8328_dai = {
 		.formats = ES8328_FORMATS,
 	},
 	.ops = &es8328_dai_ops,
-	.symmetric_rates = 1,
+	.symmetric_rate = 1,
 };
 
-static int es8328_suspend(struct snd_soc_codec *codec)
+static int es8328_suspend(struct snd_soc_component *component)
 {
 	struct es8328_priv *es8328;
 	int ret;
 
-	es8328 = snd_soc_codec_get_drvdata(codec);
+	es8328 = snd_soc_component_get_drvdata(component);
 
 	clk_disable_unprepare(es8328->clk);
 
 	ret = regulator_bulk_disable(ARRAY_SIZE(es8328->supplies),
 			es8328->supplies);
 	if (ret) {
-		dev_err(codec->dev, "unable to disable regulators\n");
+		dev_err(component->dev, "unable to disable regulators\n");
 		return ret;
 	}
 	return 0;
 }
 
-static int es8328_resume(struct snd_soc_codec *codec)
+static int es8328_resume(struct snd_soc_component *component)
 {
-	struct regmap *regmap = dev_get_regmap(codec->dev, NULL);
-	struct es8328_priv *es8328;
+	struct es8328_priv *es8328 = snd_soc_component_get_drvdata(component);
 	int ret;
-
-	es8328 = snd_soc_codec_get_drvdata(codec);
 
 	ret = clk_prepare_enable(es8328->clk);
 	if (ret) {
-		dev_err(codec->dev, "unable to enable clock\n");
+		dev_err(component->dev, "unable to enable clock\n");
 		return ret;
 	}
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(es8328->supplies),
 					es8328->supplies);
 	if (ret) {
-		dev_err(codec->dev, "unable to enable regulators\n");
-		return ret;
+		dev_err(component->dev, "unable to enable regulators\n");
+		goto err_clk;
 	}
 
-	regcache_mark_dirty(regmap);
-	ret = regcache_sync(regmap);
+	regcache_mark_dirty(es8328->regmap);
+	ret = regcache_sync(es8328->regmap);
 	if (ret) {
-		dev_err(codec->dev, "unable to sync regcache\n");
-		return ret;
+		dev_err(component->dev, "unable to sync regcache\n");
+		goto err_regulators;
 	}
 
 	return 0;
+
+err_regulators:
+	regulator_bulk_disable(ARRAY_SIZE(es8328->supplies), es8328->supplies);
+err_clk:
+	clk_disable_unprepare(es8328->clk);
+	return ret;
 }
 
-static int es8328_codec_probe(struct snd_soc_codec *codec)
+static int es8328_component_probe(struct snd_soc_component *component)
 {
 	struct es8328_priv *es8328;
 	int ret;
 
-	es8328 = snd_soc_codec_get_drvdata(codec);
+	es8328 = snd_soc_component_get_drvdata(component);
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(es8328->supplies),
 					es8328->supplies);
 	if (ret) {
-		dev_err(codec->dev, "unable to enable regulators\n");
+		dev_err(component->dev, "unable to enable regulators\n");
 		return ret;
-	}
-
-	/* Setup clocks */
-	es8328->clk = devm_clk_get(codec->dev, NULL);
-	if (IS_ERR(es8328->clk)) {
-		dev_err(codec->dev, "codec clock missing or invalid\n");
-		ret = PTR_ERR(es8328->clk);
-		goto clk_fail;
 	}
 
 	ret = clk_prepare_enable(es8328->clk);
 	if (ret) {
-		dev_err(codec->dev, "unable to prepare codec clk\n");
+		dev_err(component->dev, "unable to prepare codec clk\n");
 		goto clk_fail;
 	}
 
@@ -806,46 +843,44 @@ clk_fail:
 	return ret;
 }
 
-static int es8328_remove(struct snd_soc_codec *codec)
+static void es8328_remove(struct snd_soc_component *component)
 {
 	struct es8328_priv *es8328;
 
-	es8328 = snd_soc_codec_get_drvdata(codec);
+	es8328 = snd_soc_component_get_drvdata(component);
 
-	if (es8328->clk)
-		clk_disable_unprepare(es8328->clk);
+	clk_disable_unprepare(es8328->clk);
 
 	regulator_bulk_disable(ARRAY_SIZE(es8328->supplies),
 			       es8328->supplies);
-
-	return 0;
 }
 
 const struct regmap_config es8328_regmap_config = {
 	.reg_bits	= 8,
 	.val_bits	= 8,
 	.max_register	= ES8328_REG_MAX,
-	.cache_type	= REGCACHE_RBTREE,
-	.use_single_rw	= true,
+	.cache_type	= REGCACHE_MAPLE,
+	.use_single_read = true,
+	.use_single_write = true,
 };
 EXPORT_SYMBOL_GPL(es8328_regmap_config);
 
-static const struct snd_soc_codec_driver es8328_codec_driver = {
-	.probe		  = es8328_codec_probe,
-	.suspend	  = es8328_suspend,
-	.resume		  = es8328_resume,
-	.remove		  = es8328_remove,
-	.set_bias_level	  = es8328_set_bias_level,
-	.suspend_bias_off = true,
-
-	.component_driver = {
-		.controls		= es8328_snd_controls,
-		.num_controls		= ARRAY_SIZE(es8328_snd_controls),
-		.dapm_widgets		= es8328_dapm_widgets,
-		.num_dapm_widgets	= ARRAY_SIZE(es8328_dapm_widgets),
-		.dapm_routes		= es8328_dapm_routes,
-		.num_dapm_routes	= ARRAY_SIZE(es8328_dapm_routes),
-	},
+static const struct snd_soc_component_driver es8328_component_driver = {
+	.probe			= es8328_component_probe,
+	.remove			= es8328_remove,
+	.suspend		= es8328_suspend,
+	.resume			= es8328_resume,
+	.set_bias_level		= es8328_set_bias_level,
+	.controls		= es8328_snd_controls,
+	.num_controls		= ARRAY_SIZE(es8328_snd_controls),
+	.dapm_widgets		= es8328_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(es8328_dapm_widgets),
+	.dapm_routes		= es8328_dapm_routes,
+	.num_dapm_routes	= ARRAY_SIZE(es8328_dapm_routes),
+	.suspend_bias_off	= 1,
+	.idle_bias_on		= 1,
+	.use_pmdown_time	= 1,
+	.endianness		= 1,
 };
 
 int es8328_probe(struct device *dev, struct regmap *regmap)
@@ -863,6 +898,11 @@ int es8328_probe(struct device *dev, struct regmap *regmap)
 
 	es8328->regmap = regmap;
 
+	es8328->clk = devm_clk_get(dev, NULL);
+	if (IS_ERR(es8328->clk))
+		return dev_err_probe(dev, PTR_ERR(es8328->clk),
+				     "codec clock missing or invalid\n");
+
 	for (i = 0; i < ARRAY_SIZE(es8328->supplies); i++)
 		es8328->supplies[i].supply = supply_names[i];
 
@@ -875,8 +915,8 @@ int es8328_probe(struct device *dev, struct regmap *regmap)
 
 	dev_set_drvdata(dev, es8328);
 
-	return snd_soc_register_codec(dev,
-			&es8328_codec_driver, &es8328_dai, 1);
+	return devm_snd_soc_register_component(dev,
+			&es8328_component_driver, &es8328_dai, 1);
 }
 EXPORT_SYMBOL_GPL(es8328_probe);
 

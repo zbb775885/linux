@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * RTC Driver for X-Powers AC100
  *
  * Copyright (c) 2016 Chen-Yu Tsai
  *
  * Chen-Yu Tsai <wens@csie.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
  */
 
 #include <linux/bcd.h>
@@ -107,7 +99,7 @@ struct ac100_rtc_dev {
 	struct clk_hw_onecell_data *clk_data;
 };
 
-/**
+/*
  * Clock controls for 3 clock output pins
  */
 
@@ -148,50 +140,73 @@ static unsigned long ac100_clkout_recalc_rate(struct clk_hw *hw,
 				   AC100_CLKOUT_DIV_WIDTH);
 }
 
-static long ac100_clkout_round_rate(struct clk_hw *hw, unsigned long rate,
-				    unsigned long prate)
-{
-	unsigned long best_rate = 0, tmp_rate, tmp_prate;
-	int i;
-
-	if (prate == AC100_RTC_32K_RATE)
-		return divider_round_rate(hw, rate, &prate, NULL,
-					  AC100_CLKOUT_DIV_WIDTH,
-					  CLK_DIVIDER_POWER_OF_TWO);
-
-	for (i = 0; ac100_clkout_prediv[i].div; i++) {
-		tmp_prate = DIV_ROUND_UP(prate, ac100_clkout_prediv[i].val);
-		tmp_rate = divider_round_rate(hw, rate, &tmp_prate, NULL,
-					      AC100_CLKOUT_DIV_WIDTH,
-					      CLK_DIVIDER_POWER_OF_TWO);
-
-		if (tmp_rate > rate)
-			continue;
-		if (rate - tmp_rate < best_rate - tmp_rate)
-			best_rate = tmp_rate;
-	}
-
-	return best_rate;
-}
-
 static int ac100_clkout_determine_rate(struct clk_hw *hw,
 				       struct clk_rate_request *req)
 {
-	struct clk_hw *best_parent;
+	int i, ret, num_parents = clk_hw_get_num_parents(hw);
+	struct clk_hw *best_parent = NULL;
 	unsigned long best = 0;
-	int i, num_parents = clk_hw_get_num_parents(hw);
 
 	for (i = 0; i < num_parents; i++) {
 		struct clk_hw *parent = clk_hw_get_parent_by_index(hw, i);
-		unsigned long tmp, prate = clk_hw_get_rate(parent);
+		unsigned long prate;
 
-		tmp = ac100_clkout_round_rate(hw, req->rate, prate);
-
-		if (tmp > req->rate)
+		/*
+		 * The clock has two parents, one is a fixed clock which is
+		 * internally registered by the ac100 driver. The other parent
+		 * is a clock from the codec side of the chip, which we
+		 * properly declare and reference in the devicetree and is
+		 * not implemented in any driver right now.
+		 * If the clock core looks for the parent of that second
+		 * missing clock, it can't find one that is registered and
+		 * returns NULL.
+		 * So we end up in a situation where clk_hw_get_num_parents
+		 * returns the amount of clocks we can be parented to, but
+		 * clk_hw_get_parent_by_index will not return the orphan
+		 * clocks.
+		 * Thus we need to check if the parent exists before
+		 * we get the parent rate, so we could use the RTC
+		 * without waiting for the codec to be supported.
+		 */
+		if (!parent)
 			continue;
-		if (req->rate - tmp < req->rate - best) {
-			best = tmp;
-			best_parent = parent;
+
+		prate = clk_hw_get_rate(parent);
+
+		if (prate == AC100_RTC_32K_RATE) {
+			struct clk_rate_request div_req = *req;
+
+			div_req.best_parent_rate = prate;
+
+			ret = divider_determine_rate(hw, &div_req, NULL,
+						     AC100_CLKOUT_DIV_WIDTH,
+						     CLK_DIVIDER_POWER_OF_TWO);
+			if (ret != 0 || div_req.rate > req->rate) {
+				continue;
+			} else if (req->rate - div_req.rate < req->rate - best) {
+				best = div_req.rate;
+				best_parent = parent;
+			}
+		} else {
+			int j;
+
+			for (j = 0; ac100_clkout_prediv[j].div; j++) {
+				struct clk_rate_request div_req = *req;
+				unsigned long tmp_prate;
+
+				tmp_prate = DIV_ROUND_UP(prate, ac100_clkout_prediv[j].div);
+				div_req.best_parent_rate = tmp_prate;
+
+				ret = divider_determine_rate(hw, &div_req, NULL,
+							     AC100_CLKOUT_DIV_WIDTH,
+							     CLK_DIVIDER_POWER_OF_TWO);
+				if (ret != 0 || div_req.rate > req->rate) {
+					continue;
+				} else if (req->rate - div_req.rate < req->rate - best) {
+					best = div_req.rate;
+					best_parent = parent;
+				}
+			}
 		}
 	}
 
@@ -199,7 +214,7 @@ static int ac100_clkout_determine_rate(struct clk_hw *hw,
 		return -EINVAL;
 
 	req->best_parent_hw = best_parent;
-	req->best_parent_rate = best;
+	req->best_parent_rate = clk_hw_get_rate(best_parent);
 	req->rate = best;
 
 	return 0;
@@ -295,17 +310,19 @@ static int ac100_rtc_register_clks(struct ac100_rtc_dev *chip)
 	const char *parents[2] = {AC100_RTC_32K_NAME};
 	int i, ret;
 
-	chip->clk_data = devm_kzalloc(chip->dev, sizeof(*chip->clk_data) +
-						 sizeof(*chip->clk_data->hws) *
-						 AC100_CLKOUT_NUM,
-						 GFP_KERNEL);
+	chip->clk_data = devm_kzalloc(chip->dev,
+				      struct_size(chip->clk_data, hws,
+						  AC100_CLKOUT_NUM),
+				      GFP_KERNEL);
 	if (!chip->clk_data)
 		return -ENOMEM;
 
-	chip->rtc_32k_clk = clk_hw_register_fixed_rate(chip->dev,
-						       AC100_RTC_32K_NAME,
-						       NULL, 0,
-						       AC100_RTC_32K_RATE);
+	chip->clk_data->num = AC100_CLKOUT_NUM;
+
+	chip->rtc_32k_clk = devm_clk_hw_register_fixed_rate(chip->dev,
+							    AC100_RTC_32K_NAME,
+							    NULL, 0,
+							    AC100_RTC_32K_RATE);
 	if (IS_ERR(chip->rtc_32k_clk)) {
 		ret = PTR_ERR(chip->rtc_32k_clk);
 		dev_err(chip->dev, "Failed to register RTC-32k clock: %d\n",
@@ -339,32 +356,17 @@ static int ac100_rtc_register_clks(struct ac100_rtc_dev *chip)
 		if (ret) {
 			dev_err(chip->dev, "Failed to register clk '%s': %d\n",
 				init.name, ret);
-			goto err_unregister_rtc_32k;
+			return ret;
 		}
 
 		chip->clk_data->hws[i] = &clk->hw;
 	}
 
-	chip->clk_data->num = i;
-	ret = of_clk_add_hw_provider(np, of_clk_hw_onecell_get, chip->clk_data);
-	if (ret)
-		goto err_unregister_rtc_32k;
-
-	return 0;
-
-err_unregister_rtc_32k:
-	clk_unregister_fixed_rate(chip->rtc_32k_clk->clk);
-
-	return ret;
+	return devm_of_clk_add_hw_provider(chip->dev, of_clk_hw_onecell_get,
+					   chip->clk_data);
 }
 
-static void ac100_rtc_unregister_clks(struct ac100_rtc_dev *chip)
-{
-	of_clk_del_provider(chip->dev->of_node);
-	clk_unregister_fixed_rate(chip->rtc_32k_clk->clk);
-}
-
-/**
+/*
  * RTC related bits
  */
 static int ac100_rtc_get_time(struct device *dev, struct rtc_time *rtc_tm)
@@ -387,7 +389,7 @@ static int ac100_rtc_get_time(struct device *dev, struct rtc_time *rtc_tm)
 	rtc_tm->tm_year = bcd2bin(reg[6] & AC100_RTC_YEA_MASK) +
 			  AC100_YEAR_OFF;
 
-	return rtc_valid_tm(rtc_tm);
+	return 0;
 }
 
 static int ac100_rtc_set_time(struct device *dev, struct rtc_time *rtc_tm)
@@ -514,12 +516,12 @@ static irqreturn_t ac100_rtc_irq(int irq, void *data)
 	unsigned int val = 0;
 	int ret;
 
-	mutex_lock(&chip->rtc->ops_lock);
+	guard(rtc_ops)(chip->rtc);
 
 	/* read status */
 	ret = regmap_read(regmap, AC100_ALM_INT_STA, &val);
 	if (ret)
-		goto out;
+		return IRQ_HANDLED;
 
 	if (val & AC100_ALM_INT_ENABLE) {
 		/* signal rtc framework */
@@ -528,16 +530,14 @@ static irqreturn_t ac100_rtc_irq(int irq, void *data)
 		/* clear status */
 		ret = regmap_write(regmap, AC100_ALM_INT_STA, val);
 		if (ret)
-			goto out;
+			return IRQ_HANDLED;
 
 		/* disable interrupt */
 		ret = ac100_rtc_alarm_irq_enable(chip->dev, 0);
 		if (ret)
-			goto out;
+			return IRQ_HANDLED;
 	}
 
-out:
-	mutex_unlock(&chip->rtc->ops_lock);
 	return IRQ_HANDLED;
 }
 
@@ -564,10 +564,8 @@ static int ac100_rtc_probe(struct platform_device *pdev)
 	chip->regmap = ac100->regmap;
 
 	chip->irq = platform_get_irq(pdev, 0);
-	if (chip->irq < 0) {
-		dev_err(&pdev->dev, "No IRQ resource\n");
+	if (chip->irq < 0)
 		return chip->irq;
-	}
 
 	chip->rtc = devm_rtc_allocate_device(&pdev->dev);
 	if (IS_ERR(chip->rtc))
@@ -598,24 +596,7 @@ static int ac100_rtc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	ret = rtc_register_device(chip->rtc);
-	if (ret) {
-		dev_err(&pdev->dev, "unable to register device\n");
-		return ret;
-	}
-
-	dev_info(&pdev->dev, "RTC enabled\n");
-
-	return 0;
-}
-
-static int ac100_rtc_remove(struct platform_device *pdev)
-{
-	struct ac100_rtc_dev *chip = platform_get_drvdata(pdev);
-
-	ac100_rtc_unregister_clks(chip);
-
-	return 0;
+	return devm_rtc_register_device(chip->rtc);
 }
 
 static const struct of_device_id ac100_rtc_match[] = {
@@ -626,7 +607,6 @@ MODULE_DEVICE_TABLE(of, ac100_rtc_match);
 
 static struct platform_driver ac100_rtc_driver = {
 	.probe		= ac100_rtc_probe,
-	.remove		= ac100_rtc_remove,
 	.driver		= {
 		.name		= "ac100-rtc",
 		.of_match_table	= of_match_ptr(ac100_rtc_match),

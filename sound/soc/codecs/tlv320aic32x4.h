@@ -1,11 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * tlv320aic32x4.h
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
 
 #ifndef _TLV320AIC32X4_H
 #define _TLV320AIC32X4_H
@@ -13,13 +9,21 @@
 struct device;
 struct regmap_config;
 
-extern const struct regmap_config aic32x4_regmap_config;
-int aic32x4_probe(struct device *dev, struct regmap *regmap);
-int aic32x4_remove(struct device *dev);
+enum aic32x4_type {
+	AIC32X4_TYPE_AIC32X4 = 0,
+	AIC32X4_TYPE_AIC32X6,
+	AIC32X4_TYPE_TAS2505,
+};
+
+extern const struct regmap_range_cfg aic32x4_regmap_pages[];
+int aic32x4_probe(struct device *dev, struct regmap *regmap,
+		  enum aic32x4_type type);
+void aic32x4_remove(struct device *dev);
+int aic32x4_register_clocks(struct device *dev, const char *mclk_name);
 
 /* tlv320aic32x4 register space (in decimal to match datasheet) */
 
-#define AIC32X4_REG(page, reg)	((page * 128) + reg)
+#define AIC32X4_REG(page, reg)	(((page) * 128) + (reg))
 
 #define	AIC32X4_PSEL		AIC32X4_REG(0, 0)
 
@@ -77,6 +81,8 @@ int aic32x4_remove(struct device *dev);
 
 #define AIC32X4_PWRCFG		AIC32X4_REG(1, 1)
 #define AIC32X4_LDOCTL		AIC32X4_REG(1, 2)
+#define AIC32X4_LPLAYBACK	AIC32X4_REG(1, 3)
+#define AIC32X4_RPLAYBACK	AIC32X4_REG(1, 4)
 #define AIC32X4_OUTPWRCTL	AIC32X4_REG(1, 9)
 #define AIC32X4_CMMODE		AIC32X4_REG(1, 10)
 #define AIC32X4_HPLROUTE	AIC32X4_REG(1, 12)
@@ -88,6 +94,10 @@ int aic32x4_remove(struct device *dev);
 #define	AIC32X4_LOLGAIN		AIC32X4_REG(1, 18)
 #define	AIC32X4_LORGAIN		AIC32X4_REG(1, 19)
 #define AIC32X4_HEADSTART	AIC32X4_REG(1, 20)
+#define TAS2505_HPVOL		AIC32X4_REG(1, 22)
+#define TAS2505_SPK		AIC32X4_REG(1, 45)
+#define TAS2505_SPKVOL1		AIC32X4_REG(1, 46)
+#define TAS2505_SPKVOL2		AIC32X4_REG(1, 48)
 #define AIC32X4_MICBIAS		AIC32X4_REG(1, 51)
 #define AIC32X4_LMICPGAPIN	AIC32X4_REG(1, 52)
 #define AIC32X4_LMICPGANIN	AIC32X4_REG(1, 54)
@@ -96,6 +106,8 @@ int aic32x4_remove(struct device *dev);
 #define AIC32X4_FLOATINGINPUT	AIC32X4_REG(1, 58)
 #define AIC32X4_LMICPGAVOL	AIC32X4_REG(1, 59)
 #define AIC32X4_RMICPGAVOL	AIC32X4_REG(1, 60)
+#define TAS2505_REFPOWERUP	AIC32X4_REG(1, 122)
+#define AIC32X4_REFPOWERUP	AIC32X4_REG(1, 123)
 
 /* Bits, masks, and shifts */
 
@@ -195,6 +207,7 @@ int aic32x4_remove(struct device *dev);
 /* AIC32X4_MICBIAS */
 #define AIC32X4_MICBIAS_LDOIN		BIT(3)
 #define AIC32X4_MICBIAS_2075V		0x60
+#define AIC32x4_MICBIAS_MASK            GENMASK(6, 3)
 
 /* AIC32X4_LMICPGANIN */
 #define AIC32X4_LMICPGANIN_IN2R_10K	0x10
@@ -203,5 +216,49 @@ int aic32x4_remove(struct device *dev);
 /* AIC32X4_RMICPGANIN */
 #define AIC32X4_RMICPGANIN_IN1L_10K	0x10
 #define AIC32X4_RMICPGANIN_CM1R_10K	0x40
+
+/* AIC32X4_REFPOWERUP */
+#define AIC32X4_REFPOWERUP_SLOW		0x04
+#define AIC32X4_REFPOWERUP_40MS		0x05
+#define AIC32X4_REFPOWERUP_80MS		0x06
+#define AIC32X4_REFPOWERUP_120MS	0x07
+
+/* Common mask and enable for all of the dividers */
+#define AIC32X4_DIVEN			BIT(7)
+#define AIC32X4_DIV_MASK		GENMASK(6, 0)
+#define AIC32X4_DIV_MAX			128
+
+/* Clock Limits */
+#define AIC32X4_MAX_DOSR_FREQ		6200000
+#define AIC32X4_MIN_DOSR_FREQ		2800000
+#define AIC32X4_MAX_CODEC_CLKIN_FREQ    110000000
+#define AIC32X4_MAX_PLL_CLKIN		20000000
+
+#define AIC32X4_PWR_MICBIAS_2075_LDOIN		0x00000001
+#define AIC32X4_PWR_AVDD_DVDD_WEAK_DISABLE	0x00000002
+#define AIC32X4_PWR_AIC32X4_LDO_ENABLE		0x00000004
+#define AIC32X4_PWR_CMMODE_LDOIN_RANGE_18_36	0x00000008
+#define AIC32X4_PWR_CMMODE_HP_LDOIN_POWERED	0x00000010
+
+#define AIC32X4_MICPGA_ROUTE_LMIC_IN2R_10K	0x00000001
+#define AIC32X4_MICPGA_ROUTE_RMIC_IN1L_10K	0x00000002
+
+/* GPIO API */
+#define AIC32X4_MFPX_DEFAULT_VALUE	0xff
+
+#define AIC32X4_MFP1_DIN_DISABLED	0
+#define AIC32X4_MFP1_DIN_ENABLED	0x2
+#define AIC32X4_MFP1_GPIO_IN		0x4
+
+#define AIC32X4_MFP2_GPIO_OUT_LOW	0x0
+#define AIC32X4_MFP2_GPIO_OUT_HIGH	0x1
+
+#define AIC32X4_MFP_GPIO_ENABLED	0x4
+
+#define AIC32X4_MFP5_GPIO_DISABLED	0x0
+#define AIC32X4_MFP5_GPIO_INPUT		0x8
+#define AIC32X4_MFP5_GPIO_OUTPUT	0xc
+#define AIC32X4_MFP5_GPIO_OUT_LOW	0x0
+#define AIC32X4_MFP5_GPIO_OUT_HIGH	0x1
 
 #endif				/* _TLV320AIC32X4_H */

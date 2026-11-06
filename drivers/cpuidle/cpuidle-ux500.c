@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2012 Linaro : Daniel Lezcano <daniel.lezcano@linaro.org> (IBM)
  *
  * Based on the work of Rickard Andersson <rickard.andersson@stericsson.com>
  * and Jonas Aaberg <jonas.aberg@stericsson.com>.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/init.h>
@@ -14,7 +11,7 @@
 #include <linux/spinlock.h>
 #include <linux/atomic.h>
 #include <linux/smp.h>
-#include <linux/mfd/dbx500-prcmu.h>
+#include <linux/mfd/db8500-prcmu.h>
 #include <linux/platform_data/arm-ux500-pm.h>
 #include <linux/platform_device.h>
 
@@ -69,7 +66,7 @@ static inline int ux500_enter_idle(struct cpuidle_device *dev,
 		/* Go to the retention state, the prcmu will wait for the
 		 * cpu to go WFI and this is what happens after exiting this
 		 * 'master' critical section */
-		if (prcmu_set_power_state(PRCMU_AP_IDLE, true, true))
+		if (db8500_prcmu_set_power_state(PRCMU_AP_IDLE, true, true))
 			goto out;
 
 		/* When we switch to retention, the prcmu is in charge
@@ -112,7 +109,7 @@ static struct cpuidle_driver ux500_idle_driver = {
 static int dbx500_cpuidle_probe(struct platform_device *pdev)
 {
 	/* Configure wake up reasons */
-	prcmu_enable_wakeups(PRCMU_WAKEUP(ARM) | PRCMU_WAKEUP(RTC) |
+	db8500_prcmu_enable_wakeups(PRCMU_WAKEUP(ARM) | PRCMU_WAKEUP(RTC) |
 			     PRCMU_WAKEUP(ABB));
 
 	return cpuidle_register(&ux500_idle_driver, NULL);
@@ -120,7 +117,7 @@ static int dbx500_cpuidle_probe(struct platform_device *pdev)
 
 static struct platform_driver dbx500_cpuidle_plat_driver = {
 	.driver = {
-		.name = "cpuidle-dbx500",
+		.name = "db8500-cpuidle",
 	},
 	.probe = dbx500_cpuidle_probe,
 };

@@ -25,6 +25,7 @@
 
 #include "dm_services.h"
 
+#include "include/gpio_interface.h"
 #include "include/gpio_types.h"
 #include "hw_gpio.h"
 #include "hw_ddc.h"
@@ -35,25 +36,27 @@
 
 #undef FN
 #define FN(reg_name, field_name) \
-	ddc->shifts->field_name, ddc->masks->field_name
+	gpio_reg_shift(ddc->shifts->field_name), ddc->masks->field_name
 
 #define CTX \
 	ddc->base.base.ctx
 #define REG(reg)\
 	(ddc->regs->reg)
 
-static void destruct(
+struct gpio;
+
+static void dal_hw_ddc_destruct(
 	struct hw_ddc *pin)
 {
 	dal_hw_gpio_destruct(&pin->base);
 }
 
-static void destroy(
+static void dal_hw_ddc_destroy(
 	struct hw_gpio_pin **ptr)
 {
 	struct hw_ddc *pin = HW_DDC_FROM_BASE(*ptr);
 
-	destruct(pin);
+	dal_hw_ddc_destruct(pin);
 
 	kfree(pin);
 
@@ -91,23 +94,25 @@ static enum gpio_result set_config(
 		 * is required for detection of AUX mode */
 		if (hw_gpio->base.en != GPIO_DDC_LINE_VIP_PAD) {
 			if (!ddc_data_pd_en || !ddc_clk_pd_en) {
-
-				REG_SET_2(gpio.MASK_reg, regval,
+				if (hw_gpio->base.en == GPIO_DDC_LINE_DDC_VGA) {
+					// bit 4 of mask has different usage in some cases
+					REG_SET(gpio.MASK_reg, regval, DC_GPIO_DDC1DATA_PD_EN, 1);
+				} else {
+					REG_SET_2(gpio.MASK_reg, regval,
 						DC_GPIO_DDC1DATA_PD_EN, 1,
 						DC_GPIO_DDC1CLK_PD_EN, 1);
-
+				}
 				if (config_data->type ==
 						GPIO_CONFIG_TYPE_I2C_AUX_DUAL_MODE)
 					msleep(3);
 			}
 		} else {
-			uint32_t reg2;
 			uint32_t sda_pd_dis = 0;
 			uint32_t scl_pd_dis = 0;
 
-			reg2 = REG_GET_2(gpio.MASK_reg,
-					DC_GPIO_SDA_PD_DIS, &sda_pd_dis,
-					DC_GPIO_SCL_PD_DIS, &scl_pd_dis);
+			REG_GET_2(gpio.MASK_reg,
+				  DC_GPIO_SDA_PD_DIS, &sda_pd_dis,
+				  DC_GPIO_SCL_PD_DIS, &scl_pd_dis);
 
 			if (sda_pd_dis) {
 				REG_SET(gpio.MASK_reg, regval,
@@ -144,6 +149,13 @@ static enum gpio_result set_config(
 					AUX_PAD1_MODE, 0);
 		}
 
+		if (ddc->regs->dc_gpio_aux_ctrl_5 != 0) {
+				REG_UPDATE(dc_gpio_aux_ctrl_5, DDC_PAD_I2CMODE, 1);
+		}
+		//set  DC_IO_aux_rxsel = 2'b01
+		if (ddc->regs->phy_aux_cntl != 0) {
+				REG_UPDATE(phy_aux_cntl, AUX_PAD_RXSEL, 1);
+		}
 		return GPIO_RESULT_OK;
 	case GPIO_DDC_CONFIG_TYPE_MODE_AUX:
 		/* set the AUX pad mode */
@@ -151,11 +163,14 @@ static enum gpio_result set_config(
 			REG_SET(gpio.MASK_reg, regval,
 					AUX_PAD1_MODE, 1);
 		}
+		if (ddc->regs->dc_gpio_aux_ctrl_5 != 0) {
+			REG_UPDATE(dc_gpio_aux_ctrl_5,
+					DDC_PAD_I2CMODE, 0);
+		}
 
 		return GPIO_RESULT_OK;
 	case GPIO_DDC_CONFIG_TYPE_POLL_FOR_CONNECT:
-		if ((hw_gpio->base.en >= GPIO_DDC_LINE_DDC1) &&
-			(hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA)) {
+		if (hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA) {
 			REG_UPDATE_3(ddc_setup,
 				DC_I2C_DDC1_ENABLE, 1,
 				DC_I2C_DDC1_EDID_DETECT_ENABLE, 1,
@@ -164,8 +179,7 @@ static enum gpio_result set_config(
 		}
 	break;
 	case GPIO_DDC_CONFIG_TYPE_POLL_FOR_DISCONNECT:
-		if ((hw_gpio->base.en >= GPIO_DDC_LINE_DDC1) &&
-			(hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA)) {
+		if (hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA) {
 			REG_UPDATE_3(ddc_setup,
 				DC_I2C_DDC1_ENABLE, 1,
 				DC_I2C_DDC1_EDID_DETECT_ENABLE, 1,
@@ -174,8 +188,7 @@ static enum gpio_result set_config(
 		}
 	break;
 	case GPIO_DDC_CONFIG_TYPE_DISABLE_POLLING:
-		if ((hw_gpio->base.en >= GPIO_DDC_LINE_DDC1) &&
-			(hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA)) {
+		if (hw_gpio->base.en <= GPIO_DDC_LINE_DDC_VGA) {
 			REG_UPDATE_2(ddc_setup,
 				DC_I2C_DDC1_ENABLE, 0,
 				DC_I2C_DDC1_EDID_DETECT_ENABLE, 0);
@@ -190,7 +203,7 @@ static enum gpio_result set_config(
 }
 
 static const struct hw_gpio_pin_funcs funcs = {
-	.destroy = destroy,
+	.destroy = dal_hw_ddc_destroy,
 	.open = dal_hw_gpio_open,
 	.get_value = dal_hw_gpio_get_value,
 	.set_value = dal_hw_gpio_set_value,
@@ -199,7 +212,7 @@ static const struct hw_gpio_pin_funcs funcs = {
 	.close = dal_hw_gpio_close,
 };
 
-static void construct(
+static void dal_hw_ddc_construct(
 	struct hw_ddc *ddc,
 	enum gpio_id id,
 	uint32_t en,
@@ -209,24 +222,332 @@ static void construct(
 	ddc->base.base.funcs = &funcs;
 }
 
-struct hw_gpio_pin *dal_hw_ddc_create(
+void dal_hw_ddc_init(
+	struct hw_ddc **hw_ddc,
 	struct dc_context *ctx,
 	enum gpio_id id,
 	uint32_t en)
 {
-	struct hw_ddc *pin;
-
-	if ((en < GPIO_DDC_LINE_MIN) || (en > GPIO_DDC_LINE_MAX)) {
+	if (en > GPIO_DDC_LINE_MAX) {
 		ASSERT_CRITICAL(false);
-		return NULL;
+		*hw_ddc = NULL;
 	}
 
-	pin = kzalloc(sizeof(struct hw_ddc), GFP_KERNEL);
-	if (!pin) {
+	*hw_ddc = kzalloc_obj(struct hw_ddc);
+	if (!*hw_ddc) {
 		ASSERT_CRITICAL(false);
-		return NULL;
+		return;
 	}
 
-	construct(pin, id, en, ctx);
-	return &pin->base.base;
+	dal_hw_ddc_construct(*hw_ddc, id, en, ctx);
+}
+
+struct hw_gpio_pin *dal_hw_ddc_get_pin(struct gpio *gpio)
+{
+	struct hw_ddc *hw_ddc = dal_gpio_get_ddc(gpio);
+
+	return &hw_ddc->base.base;
+}
+
+static void store_registers_ddc_i3cpad(
+	struct hw_ddc *ddc)
+{
+	switch (ddc->base.base.id) {
+	case GPIO_ID_DDC_DATA:
+		REG_GET(dc_i3cpad_control0, DC_I3CPAD_DDCDATA_MASK, &ddc->base.store.mask);
+		REG_GET(dc_i3cpad_control0, DC_I3CPAD_DATA_A, &ddc->base.store.a);
+		REG_GET(dc_i3cpad_control0, DC_I3CPAD_DATA_EN, &ddc->base.store.en);
+		break;
+	case GPIO_ID_DDC_CLOCK:
+		REG_GET(dc_i3cpad_control0, DC_I3CPAD_DDCCLK_MASK, &ddc->base.store.mask);
+		REG_GET(dc_i3cpad_control0, DC_I3CPAD_CLK_A, &ddc->base.store.a);
+		REG_GET(dc_i3cpad_control0, DC_I3CPAD_CLK_EN, &ddc->base.store.en);
+		break;
+	default:
+		break;
+	}
+}
+
+static void restore_registers_ddc_i3cpad(
+	struct hw_ddc *ddc)
+{
+	switch (ddc->base.base.id) {
+	case GPIO_ID_DDC_DATA:
+		REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCDATA_MASK, ddc->base.store.mask);
+		REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_A, ddc->base.store.a);
+		REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_EN, ddc->base.store.en);
+		break;
+	case GPIO_ID_DDC_CLOCK:
+		REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCCLK_MASK, ddc->base.store.mask);
+		REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_A, ddc->base.store.a);
+		REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_EN, ddc->base.store.en);
+		break;
+	default:
+		break;
+	}
+}
+
+bool dal_hw_ddc_open_i3cpad(
+	struct hw_gpio_pin *ptr,
+	enum gpio_mode mode)
+{
+	struct hw_ddc *ddc = HW_DDC_FROM_BASE(ptr);
+
+	store_registers_ddc_i3cpad(ddc);
+
+	ptr->opened = (dal_hw_ddc_config_mode_i3cpad(ddc, mode) == GPIO_RESULT_OK);
+
+	return ptr->opened;
+}
+
+enum gpio_result dal_hw_ddc_get_value_i3cpad(
+	const struct hw_gpio_pin *ptr,
+	uint32_t *value)
+{
+	struct hw_ddc *ddc = HW_DDC_FROM_BASE(ptr);
+	enum gpio_result result = GPIO_RESULT_OK;
+
+	switch (ptr->mode) {
+	case GPIO_MODE_INPUT:
+	case GPIO_MODE_OUTPUT:
+	case GPIO_MODE_HARDWARE:
+	case GPIO_MODE_FAST_OUTPUT:
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_GET(dc_i3cpad_control0, DC_I3CPAD_DATA_Y, value);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_GET(dc_i3cpad_control0, DC_I3CPAD_CLK_Y, value);
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		result = GPIO_RESULT_NON_SPECIFIC_ERROR;
+	}
+	return result;
+}
+
+enum gpio_result dal_hw_ddc_set_value_i3cpad(
+	const struct hw_gpio_pin *ptr,
+	uint32_t value)
+{
+	struct hw_ddc *ddc = HW_DDC_FROM_BASE(ptr);
+
+	switch (ptr->mode) {
+	case GPIO_MODE_OUTPUT:
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_A, value);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_A, value);
+			break;
+		default:
+			break;
+		}
+		return GPIO_RESULT_OK;
+	case GPIO_MODE_FAST_OUTPUT:
+		/* We use (EN) to faster switch (used in DDC GPIO).
+		 * So (A) is grounded, output is driven by (EN = 0)
+		 * to pull the line down (output == 0) and (EN=1)
+		 * then output is tri-state */
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_EN, value);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_EN, value);
+			break;
+		default:
+			break;
+		}
+		return GPIO_RESULT_OK;
+	default:
+		return GPIO_RESULT_NON_SPECIFIC_ERROR;
+	}
+}
+
+enum gpio_result dal_hw_ddc_change_mode_i3cpad(
+	struct hw_gpio_pin *ptr,
+	enum gpio_mode mode)
+{
+	struct hw_ddc *ddc = HW_DDC_FROM_BASE(ptr);
+
+	return dal_hw_ddc_config_mode_i3cpad(ddc, mode);
+}
+
+enum gpio_result dal_hw_ddc_config_mode_i3cpad(
+	struct hw_ddc *ddc,
+	enum gpio_mode mode)
+{
+	ddc->base.base.mode = mode;
+
+	switch (mode) {
+	case GPIO_MODE_INPUT:
+		/* turn off output enable, act as input pin;
+		 * program the pin as GPIO, mask out signal driven by HW
+		 */
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_EN, 0);
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCDATA_MASK, 1);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_EN, 0);
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCCLK_MASK, 1);
+			break;
+		default:
+			break;
+		}
+		return GPIO_RESULT_OK;
+
+	case GPIO_MODE_OUTPUT:
+		/* turn on output enable, act as output pin;
+		 * program the pin as GPIO, mask out signal driven by HW
+		 */
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_A, 0);
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCDATA_MASK, 1);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_A, 0);
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCCLK_MASK, 1);
+			break;
+		default:
+			break;
+		}
+		return GPIO_RESULT_OK;
+
+	case GPIO_MODE_FAST_OUTPUT:
+		/* grounding the A register then use the EN register bit
+		 * will have faster effect on the rise time
+		 */
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DATA_A, 0);
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCDATA_MASK, 1);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_CLK_A, 0);
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCCLK_MASK, 1);
+			break;
+		default:
+			break;
+		}
+		return GPIO_RESULT_OK;
+
+	case GPIO_MODE_HARDWARE:
+		/* program the pin as tri-state, pin is driven by HW */
+		switch (ddc->base.base.id) {
+		case GPIO_ID_DDC_DATA:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCDATA_MASK, 0);
+			break;
+		case GPIO_ID_DDC_CLOCK:
+			REG_UPDATE(dc_i3cpad_control0, DC_I3CPAD_DDCCLK_MASK, 0);
+			break;
+		default:
+			break;
+		}
+		return GPIO_RESULT_OK;
+
+	default:
+	case GPIO_MODE_INTERRUPT:
+	/* Interrupt mode supported only by HPD (IrqGpio) old pins. */
+		return GPIO_RESULT_NON_SPECIFIC_ERROR;
+	}
+}
+
+static enum gpio_result dal_hw_ddc_set_config_i3cpad(
+	struct hw_gpio_pin *ptr,
+	const struct gpio_config_data *config_data)
+{
+	struct hw_ddc *ddc = HW_DDC_FROM_BASE(ptr);
+
+	switch (config_data->config.ddc.type) {
+	/* For ASICs with i3cpad module there is no dual pad mode for i3cpads */
+	case GPIO_DDC_CONFIG_TYPE_MODE_I2C:
+	case GPIO_DDC_CONFIG_TYPE_MODE_AUX:
+		/* Enable the RX for the PAD (it is disabled by default). Required for
+		 * both I2C (EDID) and AUX (DPCD); without it the sink reply is never
+		 * received and the transaction times out. */
+		REG_UPDATE(dc_i3cpad_control1, DC_I3CPAD_RXSEL, 0);
+		return GPIO_RESULT_OK;
+
+	case GPIO_DDC_CONFIG_TYPE_POLL_FOR_CONNECT:
+		REG_UPDATE_3(ddc_setup,
+			DC_I2C_DDC1_ENABLE, 1,
+			DC_I2C_DDC1_EDID_DETECT_ENABLE, 1,
+			DC_I2C_DDC1_EDID_DETECT_MODE, 0);
+		return GPIO_RESULT_OK;
+
+	case GPIO_DDC_CONFIG_TYPE_POLL_FOR_DISCONNECT:
+		REG_UPDATE_3(ddc_setup,
+			DC_I2C_DDC1_ENABLE, 1,
+			DC_I2C_DDC1_EDID_DETECT_ENABLE, 1,
+			DC_I2C_DDC1_EDID_DETECT_MODE, 1);
+		return GPIO_RESULT_OK;
+
+	case GPIO_DDC_CONFIG_TYPE_DISABLE_POLLING:
+		REG_UPDATE_2(ddc_setup,
+			DC_I2C_DDC1_ENABLE, 0,
+			DC_I2C_DDC1_EDID_DETECT_ENABLE, 0);
+		return GPIO_RESULT_OK;
+	}
+
+	BREAK_TO_DEBUGGER();
+	return GPIO_RESULT_NON_SPECIFIC_ERROR;
+}
+
+void dal_hw_ddc_close_i3cpad(
+	struct hw_gpio_pin *ptr)
+{
+	struct hw_ddc *ddc = HW_DDC_FROM_BASE(ptr);
+
+	restore_registers_ddc_i3cpad(ddc);
+
+	ptr->mode = GPIO_MODE_UNKNOWN;
+	ptr->opened = false;
+}
+
+static const struct hw_gpio_pin_funcs funcs_i3cpad = {
+	.destroy = dal_hw_ddc_destroy,
+	.open = dal_hw_ddc_open_i3cpad,
+	.get_value = dal_hw_ddc_get_value_i3cpad,
+	.set_value = dal_hw_ddc_set_value_i3cpad,
+	.set_config = dal_hw_ddc_set_config_i3cpad,
+	.change_mode = dal_hw_ddc_change_mode_i3cpad,
+	.close = dal_hw_ddc_close_i3cpad,
+};
+
+static void dal_hw_ddc_construct_i3cpad(
+	struct hw_ddc *ddc,
+	enum gpio_id id,
+	uint32_t en,
+	struct dc_context *ctx)
+{
+	dal_hw_gpio_construct(&ddc->base, id, en, ctx);
+	ddc->base.base.funcs = &funcs_i3cpad;
+}
+
+void dal_hw_ddc_init_i3cpad(
+	struct hw_ddc **hw_ddc,
+	struct dc_context *ctx,
+	enum gpio_id id,
+	uint32_t en)
+{
+	if (en > GPIO_DDC_LINE_MAX) {
+		ASSERT_CRITICAL(false);
+		*hw_ddc = NULL;
+	}
+
+	*hw_ddc = kzalloc_obj(struct hw_ddc);
+	if (!*hw_ddc) {
+		ASSERT_CRITICAL(false);
+		return;
+	}
+
+	dal_hw_ddc_construct_i3cpad(*hw_ddc, id, en, ctx);
 }

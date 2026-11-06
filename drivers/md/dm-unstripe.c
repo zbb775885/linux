@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2017 Intel Corporation.
  *
@@ -7,12 +8,6 @@
 #include "dm.h"
 
 #include <linux/module.h>
-#include <linux/init.h>
-#include <linux/blkdev.h>
-#include <linux/bio.h>
-#include <linux/slab.h>
-#include <linux/bitops.h>
-#include <linux/device-mapper.h>
 
 struct unstripe_c {
 	struct dm_dev *dev;
@@ -38,7 +33,7 @@ static void cleanup_unstripe(struct unstripe_c *uc, struct dm_target *ti)
 }
 
 /*
- * Contruct an unstriped mapping.
+ * Construct an unstriped mapping.
  * <number of stripes> <chunk size> <stripe #> <dev_path> <offset>
  */
 static int unstripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
@@ -53,7 +48,7 @@ static int unstripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		return -EINVAL;
 	}
 
-	uc = kzalloc(sizeof(*uc), GFP_KERNEL);
+	uc = kzalloc_obj(*uc);
 	if (!uc) {
 		ti->error = "Memory allocation for unstriped context failed";
 		return -ENOMEM;
@@ -66,12 +61,6 @@ static int unstripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	if (kstrtouint(argv[1], 10, &uc->chunk_size) || !uc->chunk_size) {
 		ti->error = "Invalid chunk_size";
-		goto err;
-	}
-
-	// FIXME: must support non power of 2 chunk_size, dm-stripe.c does
-	if (!is_power_of_2(uc->chunk_size)) {
-		ti->error = "Non power of 2 chunk_size is not supported yet";
 		goto err;
 	}
 
@@ -90,15 +79,15 @@ static int unstripe_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto err;
 	}
 
-	if (sscanf(argv[4], "%llu%c", &start, &dummy) != 1) {
+	if (sscanf(argv[4], "%llu%c", &start, &dummy) != 1 || start != (sector_t)start) {
 		ti->error = "Invalid striped device offset";
 		goto err;
 	}
 	uc->physical_start = start;
 
-	uc->unstripe_offset = uc->unstripe * uc->chunk_size;
-	uc->unstripe_width = (uc->stripes - 1) * uc->chunk_size;
-	uc->chunk_shift = fls(uc->chunk_size) - 1;
+	uc->unstripe_offset = (sector_t)uc->unstripe * uc->chunk_size;
+	uc->unstripe_width = (sector_t)(uc->stripes - 1) * uc->chunk_size;
+	uc->chunk_shift = is_power_of_2(uc->chunk_size) ? fls(uc->chunk_size) - 1 : 0;
 
 	tmp_len = ti->len;
 	if (sector_div(tmp_len, uc->chunk_size)) {
@@ -128,15 +117,19 @@ static void unstripe_dtr(struct dm_target *ti)
 static sector_t map_to_core(struct dm_target *ti, struct bio *bio)
 {
 	struct unstripe_c *uc = ti->private;
-	sector_t sector = bio->bi_iter.bi_sector;
+	sector_t sector = dm_target_offset(ti, bio->bi_iter.bi_sector);
+	sector_t tmp_sector = sector;
 
 	/* Shift us up to the right "row" on the stripe */
-	sector += uc->unstripe_width * (sector >> uc->chunk_shift);
+	if (uc->chunk_shift)
+		tmp_sector >>= uc->chunk_shift;
+	else
+		sector_div(tmp_sector, uc->chunk_size);
+
+	sector += uc->unstripe_width * tmp_sector;
 
 	/* Account for what stripe we're operating on */
-	sector += uc->unstripe_offset;
-
-	return sector;
+	return sector + uc->unstripe_offset;
 }
 
 static int unstripe_map(struct dm_target *ti, struct bio *bio)
@@ -164,6 +157,10 @@ static void unstripe_status(struct dm_target *ti, status_type_t type,
 		       uc->stripes, (unsigned long long)uc->chunk_size, uc->unstripe,
 		       uc->dev->name, (unsigned long long)uc->physical_start);
 		break;
+
+	case STATUSTYPE_IMA:
+		*result = '\0';
+		break;
 	}
 }
 
@@ -185,7 +182,8 @@ static void unstripe_io_hints(struct dm_target *ti,
 
 static struct target_type unstripe_target = {
 	.name = "unstriped",
-	.version = {1, 0, 0},
+	.version = {1, 1, 0},
+	.features = DM_TARGET_NOWAIT,
 	.module = THIS_MODULE,
 	.ctr = unstripe_ctr,
 	.dtr = unstripe_dtr,
@@ -194,26 +192,9 @@ static struct target_type unstripe_target = {
 	.iterate_devices = unstripe_iterate_devices,
 	.io_hints = unstripe_io_hints,
 };
-
-static int __init dm_unstripe_init(void)
-{
-	int r;
-
-	r = dm_register_target(&unstripe_target);
-	if (r < 0)
-		DMERR("target registration failed");
-
-	return r;
-}
-
-static void __exit dm_unstripe_exit(void)
-{
-	dm_unregister_target(&unstripe_target);
-}
-
-module_init(dm_unstripe_init);
-module_exit(dm_unstripe_exit);
+module_dm(unstripe);
 
 MODULE_DESCRIPTION(DM_NAME " unstriped target");
+MODULE_ALIAS("dm-unstriped");
 MODULE_AUTHOR("Scott Bauer <scott.bauer@intel.com>");
 MODULE_LICENSE("GPL");

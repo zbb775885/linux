@@ -1,4 +1,4 @@
-/**
+/*
  * wm831x-on.c - WM831X ON pin driver
  *
  * Copyright (C) 2009 Wolfson Microelectronics plc
@@ -96,7 +96,6 @@ static int wm831x_on_probe(struct platform_device *pdev)
 	wm831x_on->dev->keybit[BIT_WORD(KEY_POWER)] = BIT_MASK(KEY_POWER);
 	wm831x_on->dev->name = "wm831x_on";
 	wm831x_on->dev->phys = "wm831x_on/input0";
-	wm831x_on->dev->dev.parent = &pdev->dev;
 
 	ret = request_threaded_irq(irq, NULL, wm831x_on_irq,
 				   IRQF_TRIGGER_RISING | IRQF_ONESHOT,
@@ -123,15 +122,13 @@ err:
 	return ret;
 }
 
-static int wm831x_on_remove(struct platform_device *pdev)
+static void wm831x_on_remove(struct platform_device *pdev)
 {
 	struct wm831x_on *wm831x_on = platform_get_drvdata(pdev);
 	int irq = platform_get_irq(pdev, 0);
 
 	free_irq(irq, wm831x_on);
 	cancel_delayed_work_sync(&wm831x_on->work);
-
-	return 0;
 }
 
 static struct platform_driver wm831x_on_driver = {

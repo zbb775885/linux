@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mm/context.c
  *
@@ -5,10 +6,6 @@
  *  Copyright (C) 2012 ARM Limited
  *
  *  Author: Will Deacon <will.deacon@arm.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/init.h>
 #include <linux/sched.h>
@@ -112,7 +109,7 @@ static int contextidr_notifier(struct notifier_block *unused, unsigned long cmd,
 	if (cmd != THREAD_NOTIFY_SWITCH)
 		return NOTIFY_DONE;
 
-	pid = task_pid_nr(thread->task) << ASID_BITS;
+	pid = task_pid_nr(thread_task(thread)) << ASID_BITS;
 	asm volatile(
 	"	mrc	p15, 0, %0, c13, c0, 1\n"
 	"	and	%0, %0, %2\n"
@@ -241,10 +238,9 @@ void check_and_switch_context(struct mm_struct *mm, struct task_struct *tsk)
 {
 	unsigned long flags;
 	unsigned int cpu = smp_processor_id();
-	u64 asid;
+	u64 asid, old_active_asid;
 
-	if (unlikely(mm->context.vmalloc_seq != init_mm.context.vmalloc_seq))
-		__check_vmalloc_seq(mm);
+	check_vmalloc_seq(mm);
 
 	/*
 	 * We cannot update the pgd and the ASID atomicly with classic
@@ -254,8 +250,17 @@ void check_and_switch_context(struct mm_struct *mm, struct task_struct *tsk)
 	cpu_set_reserved_ttbr0();
 
 	asid = atomic64_read(&mm->context.id);
-	if (!((asid ^ atomic64_read(&asid_generation)) >> ASID_BITS)
-	    && atomic64_xchg(&per_cpu(active_asids, cpu), asid))
+
+	/*
+	 * If our active_asids is zero, we are racing with an ASID roll-over
+	 * on a different CPU, so skip the update (using cmpxchg if non-zero)
+	 * and take the slow path.
+	 */
+	old_active_asid = atomic64_read(&per_cpu(active_asids, cpu));
+	if (old_active_asid &&
+	    !((asid ^ atomic64_read(&asid_generation)) >> ASID_BITS) &&
+	    atomic64_cmpxchg(&per_cpu(active_asids, cpu),
+			     old_active_asid, asid))
 		goto switch_mm_fastpath;
 
 	raw_spin_lock_irqsave(&cpu_asid_lock, flags);

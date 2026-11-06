@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * MOXA ART SoCs DMA Engine support.
  *
  * Copyright (C) 2013 Jonas Jensen
  *
  * Jonas Jensen <jonas.jensen@gmail.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2.  This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/dmaengine.h>
@@ -127,7 +124,7 @@ struct moxart_desc {
 	unsigned int			dma_cycles;
 	struct virt_dma_desc		vd;
 	uint8_t				es;
-	struct moxart_sg		sg[0];
+	struct moxart_sg		sg[] __counted_by(sglen);
 };
 
 struct moxart_chan {
@@ -151,21 +148,11 @@ struct moxart_dmadev {
 	unsigned int			irq;
 };
 
-struct moxart_filter_data {
-	struct moxart_dmadev		*mdc;
-	struct of_phandle_args		*dma_spec;
-};
-
 static const unsigned int es_bytes[] = {
 	[MOXART_DMA_DATA_TYPE_S8] = 1,
 	[MOXART_DMA_DATA_TYPE_S16] = 2,
 	[MOXART_DMA_DATA_TYPE_S32] = 4,
 };
-
-static struct device *chan2dev(struct dma_chan *chan)
-{
-	return &chan->dev->device;
-}
 
 static inline struct moxart_chan *to_moxart_dma_chan(struct dma_chan *c)
 {
@@ -190,7 +177,7 @@ static int moxart_terminate_all(struct dma_chan *chan)
 	LIST_HEAD(head);
 	u32 ctrl;
 
-	dev_dbg(chan2dev(chan), "%s: ch=%p\n", __func__, ch);
+	dev_dbg(dmaengine_chan_dev(chan), "%s: ch=%p\n", __func__, ch);
 
 	spin_lock_irqsave(&ch->vc.lock, flags);
 
@@ -280,7 +267,7 @@ static struct dma_async_tx_descriptor *moxart_prep_slave_sg(
 	unsigned int i;
 
 	if (!is_slave_direction(dir)) {
-		dev_err(chan2dev(chan), "%s: invalid DMA direction\n",
+		dev_err(dmaengine_chan_dev(chan), "%s: invalid DMA direction\n",
 			__func__);
 		return NULL;
 	}
@@ -304,14 +291,15 @@ static struct dma_async_tx_descriptor *moxart_prep_slave_sg(
 		es = MOXART_DMA_DATA_TYPE_S32;
 		break;
 	default:
-		dev_err(chan2dev(chan), "%s: unsupported data width (%u)\n",
+		dev_err(dmaengine_chan_dev(chan), "%s: unsupported data width (%u)\n",
 			__func__, dev_width);
 		return NULL;
 	}
 
-	d = kzalloc(sizeof(*d) + sg_len * sizeof(d->sg[0]), GFP_ATOMIC);
+	d = kzalloc_flex(*d, sg, sg_len, GFP_ATOMIC);
 	if (!d)
 		return NULL;
+	d->sglen = sg_len;
 
 	d->dma_dir = dir;
 	d->dev_addr = dev_addr;
@@ -321,8 +309,6 @@ static struct dma_async_tx_descriptor *moxart_prep_slave_sg(
 		d->sg[i].addr = sg_dma_address(sgent);
 		d->sg[i].len = sg_dma_len(sgent);
 	}
-
-	d->sglen = sg_len;
 
 	ch->error = 0;
 
@@ -350,7 +336,7 @@ static int moxart_alloc_chan_resources(struct dma_chan *chan)
 {
 	struct moxart_chan *ch = to_moxart_dma_chan(chan);
 
-	dev_dbg(chan2dev(chan), "%s: allocating channel #%u\n",
+	dev_dbg(dmaengine_chan_dev(chan), "%s: allocating channel #%u\n",
 		__func__, ch->ch_num);
 	ch->allocated = 1;
 
@@ -363,7 +349,7 @@ static void moxart_free_chan_resources(struct dma_chan *chan)
 
 	vchan_free_chan_resources(&ch->vc);
 
-	dev_dbg(chan2dev(chan), "%s: freeing channel #%u\n",
+	dev_dbg(dmaengine_chan_dev(chan), "%s: freeing channel #%u\n",
 		__func__, ch->ch_num);
 	ch->allocated = 0;
 }
@@ -388,7 +374,7 @@ static void moxart_set_transfer_params(struct moxart_chan *ch, unsigned int len)
 	 */
 	writel(d->dma_cycles, ch->base + REG_OFF_CYCLES);
 
-	dev_dbg(chan2dev(&ch->vc.chan), "%s: set %u DMA cycles (len=%u)\n",
+	dev_dbg(vchan_chan_dev(&ch->vc), "%s: set %u DMA cycles (len=%u)\n",
 		__func__, d->dma_cycles, len);
 }
 
@@ -469,7 +455,7 @@ static size_t moxart_dma_desc_size_in_flight(struct moxart_chan *ch)
 	completed_cycles = (ch->desc->dma_cycles - cycles);
 	size -= completed_cycles << es_bytes[ch->desc->es];
 
-	dev_dbg(chan2dev(&ch->vc.chan), "%s: size=%zu\n", __func__, size);
+	dev_dbg(vchan_chan_dev(&ch->vc), "%s: size=%zu\n", __func__, size);
 
 	return size;
 }
@@ -524,10 +510,9 @@ static irqreturn_t moxart_dma_interrupt(int irq, void *devid)
 	struct moxart_dmadev *mc = devid;
 	struct moxart_chan *ch = &mc->slave_chans[0];
 	unsigned int i;
-	unsigned long flags;
 	u32 ctrl;
 
-	dev_dbg(chan2dev(&ch->vc.chan), "%s\n", __func__);
+	dev_dbg(vchan_chan_dev(&ch->vc), "%s\n", __func__);
 
 	for (i = 0; i < APB_DMA_MAX_CHANNEL; i++, ch++) {
 		if (!ch->allocated)
@@ -535,20 +520,20 @@ static irqreturn_t moxart_dma_interrupt(int irq, void *devid)
 
 		ctrl = readl(ch->base + REG_OFF_CTRL);
 
-		dev_dbg(chan2dev(&ch->vc.chan), "%s: ch=%p ch->base=%p ctrl=%x\n",
+		dev_dbg(vchan_chan_dev(&ch->vc), "%s: ch=%p ch->base=%p ctrl=%x\n",
 			__func__, ch, ch->base, ctrl);
 
 		if (ctrl & APB_DMA_FIN_INT_STS) {
 			ctrl &= ~APB_DMA_FIN_INT_STS;
 			if (ch->desc) {
-				spin_lock_irqsave(&ch->vc.lock, flags);
+				spin_lock(&ch->vc.lock);
 				if (++ch->sgidx < ch->desc->sglen) {
 					moxart_dma_start_sg(ch, ch->sgidx);
 				} else {
 					vchan_cookie_complete(&ch->desc->vd);
 					moxart_dma_start_desc(&ch->vc.chan);
 				}
-				spin_unlock_irqrestore(&ch->vc.lock, flags);
+				spin_unlock(&ch->vc.lock);
 			}
 		}
 
@@ -567,8 +552,7 @@ static int moxart_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *node = dev->of_node;
-	struct resource *res;
-	static void __iomem *dma_base_addr;
+	void __iomem *dma_base_addr;
 	int ret, i;
 	unsigned int irq;
 	struct moxart_chan *ch;
@@ -584,8 +568,7 @@ static int moxart_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	dma_base_addr = devm_ioremap_resource(dev, res);
+	dma_base_addr = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(dma_base_addr))
 		return PTR_ERR(dma_base_addr);
 
@@ -636,7 +619,7 @@ static int moxart_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int moxart_remove(struct platform_device *pdev)
+static void moxart_remove(struct platform_device *pdev)
 {
 	struct moxart_dmadev *m = platform_get_drvdata(pdev);
 
@@ -646,8 +629,6 @@ static int moxart_remove(struct platform_device *pdev)
 
 	if (pdev->dev.of_node)
 		of_dma_controller_free(pdev->dev.of_node);
-
-	return 0;
 }
 
 static const struct of_device_id moxart_dma_match[] = {
@@ -658,7 +639,7 @@ MODULE_DEVICE_TABLE(of, moxart_dma_match);
 
 static struct platform_driver moxart_driver = {
 	.probe	= moxart_probe,
-	.remove	= moxart_remove,
+	.remove = moxart_remove,
 	.driver = {
 		.name		= "moxart-dma-engine",
 		.of_match_table	= moxart_dma_match,

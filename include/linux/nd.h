@@ -1,14 +1,6 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright(c) 2013-2015 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 #ifndef __LINUX_ND_H__
 #define __LINUX_ND_H__
@@ -16,9 +8,11 @@
 #include <linux/ndctl.h>
 #include <linux/device.h>
 #include <linux/badblocks.h>
+#include <linux/perf_event.h>
 
 enum nvdimm_event {
 	NVDIMM_REVALIDATE_POISON,
+	NVDIMM_REVALIDATE_REGION,
 };
 
 enum nvdimm_claim_class {
@@ -30,20 +24,67 @@ enum nvdimm_claim_class {
 	NVDIMM_CCLASS_UNKNOWN,
 };
 
+#define NVDIMM_EVENT_VAR(_id)  event_attr_##_id
+#define NVDIMM_EVENT_PTR(_id)  (&event_attr_##_id.attr.attr)
+
+#define NVDIMM_EVENT_ATTR(_name, _id)				\
+	PMU_EVENT_ATTR(_name, NVDIMM_EVENT_VAR(_id), _id,	\
+			nvdimm_events_sysfs_show)
+
+/* Event attribute array index */
+#define NVDIMM_PMU_FORMAT_ATTR	0
+#define NVDIMM_PMU_EVENT_ATTR	1
+#define NVDIMM_PMU_CPUMASK_ATTR	2
+#define NVDIMM_PMU_NULL_ATTR	3
+
+/**
+ * struct nvdimm_pmu - data structure for nvdimm perf driver
+ * @pmu: pmu data structure for nvdimm performance stats.
+ * @dev: nvdimm device pointer.
+ * @cpu: designated cpu for counter access.
+ * @node: node for cpu hotplug notifier link.
+ * @cpuhp_state: state for cpu hotplug notification.
+ * @arch_cpumask: cpumask to get designated cpu for counter access.
+ */
+struct nvdimm_pmu {
+	struct pmu pmu;
+	struct device *dev;
+	int cpu;
+	struct hlist_node node;
+	enum cpuhp_state cpuhp_state;
+	/* cpumask provided by arch/platform specific code */
+	struct cpumask arch_cpumask;
+};
+
+struct platform_device;
+
+#ifdef CONFIG_PERF_EVENTS
+extern ssize_t nvdimm_events_sysfs_show(struct device *dev,
+					struct device_attribute *attr,
+					char *page);
+
+int register_nvdimm_pmu(struct nvdimm_pmu *nvdimm, struct platform_device *pdev);
+void unregister_nvdimm_pmu(struct nvdimm_pmu *nd_pmu);
+
+#else
+static inline int register_nvdimm_pmu(struct nvdimm_pmu *nvdimm, struct platform_device *pdev)
+{
+	return -ENXIO;
+}
+
+static inline void unregister_nvdimm_pmu(struct nvdimm_pmu *nd_pmu) { }
+#endif
+
 struct nd_device_driver {
 	struct device_driver drv;
 	unsigned long type;
 	int (*probe)(struct device *dev);
-	int (*remove)(struct device *dev);
+	void (*remove)(struct device *dev);
 	void (*shutdown)(struct device *dev);
 	void (*notify)(struct device *dev, enum nvdimm_event event);
 };
 
-static inline struct nd_device_driver *to_nd_device_driver(
-		struct device_driver *drv)
-{
-	return container_of(drv, struct nd_device_driver, drv);
-};
+#define to_nd_device_driver(__drv)	container_of_const(__drv, struct nd_device_driver, drv)
 
 /**
  * struct nd_namespace_common - core infrastructure of a namespace
@@ -69,7 +110,7 @@ static inline struct nd_namespace_common *to_ndns(struct device *dev)
 
 /**
  * struct nd_namespace_io - device representation of a persistent memory range
- * @dev: namespace device created by the nd region driver
+ * @common: namespace device core infrastructure created by the nd region driver
  * @res: struct resource conversion of a NFIT SPA table
  * @size: cached resource_size(@res) for fast path size checks
  * @addr: virtual address to access the namespace range
@@ -95,29 +136,8 @@ struct nd_namespace_pmem {
 	struct nd_namespace_io nsio;
 	unsigned long lbasize;
 	char *alt_name;
-	u8 *uuid;
+	uuid_t *uuid;
 	int id;
-};
-
-/**
- * struct nd_namespace_blk - namespace for dimm-bounded persistent memory
- * @alt_name: namespace name supplied in the dimm label
- * @uuid: namespace name supplied in the dimm label
- * @id: ida allocated id
- * @lbasize: blk namespaces have a native sector size when btt not present
- * @size: sum of all the resource ranges allocated to this namespace
- * @num_resources: number of dpa extents to claim
- * @res: discontiguous dpa extents for given dimm
- */
-struct nd_namespace_blk {
-	struct nd_namespace_common common;
-	char *alt_name;
-	u8 *uuid;
-	int id;
-	unsigned long lbasize;
-	resource_size_t size;
-	int num_resources;
-	struct resource **res;
 };
 
 static inline struct nd_namespace_io *to_nd_namespace_io(const struct device *dev)
@@ -132,19 +152,17 @@ static inline struct nd_namespace_pmem *to_nd_namespace_pmem(const struct device
 	return container_of(nsio, struct nd_namespace_pmem, nsio);
 }
 
-static inline struct nd_namespace_blk *to_nd_namespace_blk(const struct device *dev)
-{
-	return container_of(dev, struct nd_namespace_blk, common.dev);
-}
-
 /**
  * nvdimm_read_bytes() - synchronously read bytes from an nvdimm namespace
  * @ndns: device to read
  * @offset: namespace-relative starting offset
  * @buf: buffer to fill
  * @size: transfer length
+ * @flags: process (0) or atomic (1) context
  *
  * @buf is up-to-date upon return from this routine.
+ *
+ * Returns: %0 on success or a negative error code on failure
  */
 static inline int nvdimm_read_bytes(struct nd_namespace_common *ndns,
 		resource_size_t offset, void *buf, size_t size,
@@ -155,15 +173,18 @@ static inline int nvdimm_read_bytes(struct nd_namespace_common *ndns,
 
 /**
  * nvdimm_write_bytes() - synchronously write bytes to an nvdimm namespace
- * @ndns: device to read
+ * @ndns: device to write
  * @offset: namespace-relative starting offset
  * @buf: buffer to drain
  * @size: transfer length
+ * @flags: process (0) or atomic (1) context
  *
  * NVDIMM Namepaces disks do not implement sectors internally.  Depending on
  * the @ndns, the contents of @buf may be in cpu cache, platform buffers,
  * or on backing memory media upon return from this routine.  Flushing
  * to media is handled internal to the @ndns driver, if at all.
+ *
+ * Returns: %0 on success or a negative error code on failure
  */
 static inline int nvdimm_write_bytes(struct nd_namespace_common *ndns,
 		resource_size_t offset, void *buf, size_t size,
@@ -180,6 +201,12 @@ struct nd_region;
 void nvdimm_region_notify(struct nd_region *nd_region, enum nvdimm_event event);
 int __must_check __nd_driver_register(struct nd_device_driver *nd_drv,
 		struct module *module, const char *mod_name);
+static inline void nd_driver_unregister(struct nd_device_driver *drv)
+{
+	driver_unregister(&drv->drv);
+}
 #define nd_driver_register(driver) \
 	__nd_driver_register(driver, THIS_MODULE, KBUILD_MODNAME)
+#define module_nd_driver(driver) \
+	module_driver(driver, nd_driver_register, nd_driver_unregister)
 #endif /* __LINUX_ND_H__ */

@@ -1,19 +1,5 @@
-/*
- * Copyright 2014 Cisco Systems, Inc.  All rights reserved.
- *
- * This program is free software; you may redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright 2014 Cisco Systems, Inc.  All rights reserved.
 
 #include <linux/errno.h>
 #include <linux/mempool.h>
@@ -100,7 +86,7 @@ snic_queue_report_tgt_req(struct snic *snic)
 	SNIC_BUG_ON(ntgts == 0);
 	buf_len = ntgts * sizeof(struct snic_tgt_id) + SNIC_SG_DESC_ALIGN;
 
-	buf = kzalloc(buf_len, GFP_KERNEL|GFP_DMA);
+	buf = kzalloc(buf_len, GFP_KERNEL);
 	if (!buf) {
 		snic_req_free(snic, rqi);
 		SNIC_HOST_ERR(snic->shost, "Resp Buf Alloc Failed.\n");
@@ -111,8 +97,8 @@ snic_queue_report_tgt_req(struct snic *snic)
 
 	SNIC_BUG_ON((((unsigned long)buf) % SNIC_SG_DESC_ALIGN) != 0);
 
-	pa = pci_map_single(snic->pdev, buf, buf_len, PCI_DMA_FROMDEVICE);
-	if (pci_dma_mapping_error(snic->pdev, pa)) {
+	pa = dma_map_single(&snic->pdev->dev, buf, buf_len, DMA_FROM_DEVICE);
+	if (dma_mapping_error(&snic->pdev->dev, pa)) {
 		SNIC_HOST_ERR(snic->shost,
 			      "Rpt-tgt rspbuf %p: PCI DMA Mapping Failed\n",
 			      buf);
@@ -138,7 +124,8 @@ snic_queue_report_tgt_req(struct snic *snic)
 
 	ret = snic_queue_wq_desc(snic, rqi->req, rqi->req_len);
 	if (ret) {
-		pci_unmap_single(snic->pdev, pa, buf_len, PCI_DMA_FROMDEVICE);
+		dma_unmap_single(&snic->pdev->dev, pa, buf_len,
+				 DMA_FROM_DEVICE);
 		kfree(buf);
 		rqi->sge_va = 0;
 		snic_release_untagged_req(snic, rqi);
@@ -173,9 +160,9 @@ snic_scsi_scan_tgt(struct work_struct *work)
 			 SCAN_WILD_CARD,
 			 SCSI_SCAN_RESCAN);
 
-	spin_lock_irqsave(shost->host_lock, flags);
+	spin_lock_irqsave(&shost->host_lock, flags);
 	tgt->flags &= ~SNIC_TGT_SCAN_PENDING;
-	spin_unlock_irqrestore(shost->host_lock, flags);
+	spin_unlock_irqrestore(&shost->host_lock, flags);
 } /* end of snic_scsi_scan_tgt */
 
 /*
@@ -227,7 +214,7 @@ snic_tgt_del(struct work_struct *work)
 		scsi_flush_work(shost);
 
 	/* Block IOs on child devices, stops new IOs */
-	scsi_target_block(&tgt->dev);
+	scsi_block_targets(shost, &tgt->dev);
 
 	/* Cleanup IOs */
 	snic_tgt_scsi_abort_io(tgt);
@@ -257,7 +244,7 @@ snic_tgt_create(struct snic *snic, struct snic_tgt_id *tgtid)
 		return tgt;
 	}
 
-	tgt = kzalloc(sizeof(*tgt), GFP_KERNEL);
+	tgt = kzalloc_obj(*tgt);
 	if (!tgt) {
 		SNIC_HOST_ERR(snic->shost, "Failure to allocate snic_tgt.\n");
 		ret = -ENOMEM;
@@ -300,11 +287,11 @@ snic_tgt_create(struct snic *snic, struct snic_tgt_id *tgtid)
 		break;
 	}
 
-	spin_lock_irqsave(snic->shost->host_lock, flags);
+	spin_lock_irqsave(&snic->shost->host_lock, flags);
 	list_add_tail(&tgt->list, &snic->disc.tgt_list);
 	tgt->scsi_tgt_id = snic->disc.nxt_tgt_id++;
 	tgt->state = SNIC_TGT_STAT_ONLINE;
-	spin_unlock_irqrestore(snic->shost->host_lock, flags);
+	spin_unlock_irqrestore(&snic->shost->host_lock, flags);
 
 	SNIC_HOST_INFO(snic->shost,
 		       "Tgt %d, type = %s detected. Adding..\n",
@@ -317,7 +304,10 @@ snic_tgt_create(struct snic *snic, struct snic_tgt_id *tgtid)
 			      ret);
 
 		put_device(&snic->shost->shost_gendev);
-		kfree(tgt);
+		spin_lock_irqsave(&snic->shost->host_lock, flags);
+		list_del(&tgt->list);
+		spin_unlock_irqrestore(&snic->shost->host_lock, flags);
+		put_device(&tgt->dev);
 		tgt = NULL;
 
 		return tgt;
@@ -547,7 +537,7 @@ snic_tgt_del_all(struct snic *snic)
 	scsi_flush_work(snic->shost);
 
 	mutex_lock(&snic->disc.mutex);
-	spin_lock_irqsave(snic->shost->host_lock, flags);
+	spin_lock_irqsave(&snic->shost->host_lock, flags);
 
 	list_for_each_safe(cur, nxt, &snic->disc.tgt_list) {
 		tgt = list_entry(cur, struct snic_tgt, list);
@@ -557,7 +547,7 @@ snic_tgt_del_all(struct snic *snic)
 		queue_work(snic_glob->event_q, &tgt->del_work);
 		tgt = NULL;
 	}
-	spin_unlock_irqrestore(snic->shost->host_lock, flags);
+	spin_unlock_irqrestore(&snic->shost->host_lock, flags);
 	mutex_unlock(&snic->disc.mutex);
 
 	flush_workqueue(snic_glob->event_q);

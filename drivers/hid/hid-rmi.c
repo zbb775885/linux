@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (c) 2013 Andrew Duggan <aduggan@synaptics.com>
  *  Copyright (c) 2013 Synaptics Incorporated
  *  Copyright (c) 2014 Benjamin Tissoires <benjamin.tissoires@gmail.com>
  *  Copyright (c) 2014 Red Hat, Inc
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
 #include <linux/kernel.h>
@@ -39,6 +35,7 @@
 /* device flags */
 #define RMI_DEVICE			BIT(0)
 #define RMI_DEVICE_HAS_PHYS_BUTTONS	BIT(1)
+#define RMI_DEVICE_OUTPUT_SET_REPORT	BIT(2)
 
 /*
  * retrieve the ctrl registers
@@ -89,8 +86,8 @@ struct rmi_data {
 	u8 *writeReport;
 	u8 *readReport;
 
-	int input_report_size;
-	int output_report_size;
+	u32 input_report_size;
+	u32 output_report_size;
 
 	unsigned long flags;
 
@@ -167,9 +164,19 @@ static int rmi_set_mode(struct hid_device *hdev, u8 mode)
 
 static int rmi_write_report(struct hid_device *hdev, u8 *report, int len)
 {
+	struct rmi_data *data = hid_get_drvdata(hdev);
 	int ret;
 
-	ret = hid_hw_output_report(hdev, (void *)report, len);
+	if (data->device_flags & RMI_DEVICE_OUTPUT_SET_REPORT) {
+		/*
+		 * Talk to device by using SET_REPORT requests instead.
+		 */
+		ret = hid_hw_raw_request(hdev, report[0], report,
+				len, HID_OUTPUT_REPORT, HID_REQ_SET_REPORT);
+	} else {
+		ret = hid_hw_output_report(hdev, (void *)report, len);
+	}
+
 	if (ret < 0) {
 		dev_err(&hdev->dev, "failed to write hid report (%d)\n", ret);
 		return ret;
@@ -210,7 +217,6 @@ static int rmi_hid_read_block(struct rmi_transport_dev *xport, u16 addr,
 		ret = rmi_write_report(hdev, data->writeReport,
 						data->output_report_size);
 		if (ret != data->output_report_size) {
-			clear_bit(RMI_READ_REQUEST_PENDING, &data->flags);
 			dev_err(&hdev->dev,
 				"failed to write request output report (%d)\n",
 				ret);
@@ -229,10 +235,25 @@ static int rmi_hid_read_block(struct rmi_transport_dev *xport, u16 addr,
 				break;
 			}
 
-			read_input_count = data->readReport[1];
+			read_input_count = min_t(int, data->readReport[1],
+						 data->input_report_size - 2);
+			if (!read_input_count) {
+				/*
+				 * A zero length reply advances neither
+				 * bytes_read nor bytes_needed, and because a
+				 * reply did arrive the wait above does not
+				 * time out either, so a device answering 0
+				 * forever would spin here indefinitely with
+				 * page_mutex held.
+				 */
+				hid_warn(hdev, "%s: zero-length read reply\n",
+					 __func__);
+				clear_bit(RMI_READ_DATA_PENDING, &data->flags);
+				ret = -EIO;
+				break;
+			}
 			memcpy(buf + bytes_read, &data->readReport[2],
-				read_input_count < bytes_needed ?
-					read_input_count : bytes_needed);
+				min(read_input_count, bytes_needed));
 
 			bytes_read += read_input_count;
 			bytes_needed -= read_input_count;
@@ -264,6 +285,11 @@ static int rmi_hid_write_block(struct rmi_transport_dev *xport, u16 addr,
 		ret = rmi_set_page(hdev, RMI_PAGE(addr));
 		if (ret < 0)
 			goto exit;
+	}
+
+	if (len + 4 > data->output_report_size) {
+		ret = -EINVAL;
+		goto exit;
 	}
 
 	data->writeReport[0] = RMI_WRITE_REPORT_ID;
@@ -321,6 +347,8 @@ static int rmi_input_event(struct hid_device *hdev, u8 *data, int size)
 	if (!(test_bit(RMI_STARTED, &hdata->flags)))
 		return 0;
 
+	pm_wakeup_event(hdev->dev.parent, 0);
+
 	local_irq_save(flags);
 
 	rmi_set_attn_data(rmi_dev, data[1], &data[2], size - 2);
@@ -341,8 +369,7 @@ static int rmi_read_data_event(struct hid_device *hdev, u8 *data, int size)
 		return 0;
 	}
 
-	memcpy(hdata->readReport, data, size < hdata->input_report_size ?
-			size : hdata->input_report_size);
+	memcpy(hdata->readReport, data, min((u32)size, hdata->input_report_size));
 	set_bit(RMI_READ_DATA_PENDING, &hdata->flags);
 	wake_up(&hdata->wait);
 
@@ -359,7 +386,7 @@ static int rmi_check_sanity(struct hid_device *hdev, u8 *data, int size)
 	 * such reports here.
 	 */
 
-	while ((data[valid_size - 1] == 0xff) && valid_size > 0)
+	while (valid_size > 0 && data[valid_size - 1] == 0xff)
 		valid_size--;
 
 	return valid_size;
@@ -413,7 +440,23 @@ static int rmi_event(struct hid_device *hdev, struct hid_field *field,
 	return 0;
 }
 
-#ifdef CONFIG_PM
+static void rmi_report(struct hid_device *hid, struct hid_report *report)
+{
+	struct hid_field *field = report->field[0];
+
+	if (!(hid->claimed & HID_CLAIMED_INPUT))
+		return;
+
+	switch (report->id) {
+	case RMI_READ_DATA_REPORT_ID:
+	case RMI_ATTN_REPORT_ID:
+		return;
+	}
+
+	if (field && field->hidinput && field->hidinput->input)
+		input_sync(field->hidinput->input);
+}
+
 static int rmi_suspend(struct hid_device *hdev, pm_message_t message)
 {
 	struct rmi_data *data = hid_get_drvdata(hdev);
@@ -460,7 +503,6 @@ out:
 	hid_hw_close(hdev);
 	return ret;
 }
-#endif /* CONFIG_PM */
 
 static int rmi_hid_reset(struct rmi_transport_dev *xport, u16 reset_addr)
 {
@@ -637,6 +679,7 @@ static int rmi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	hid_set_drvdata(hdev, data);
 
 	hdev->quirks |= HID_QUIRK_NO_INIT_REPORTS;
+	hdev->quirks |= HID_QUIRK_NO_INPUT_SYNC;
 
 	ret = hid_parse(hdev);
 	if (ret) {
@@ -644,8 +687,16 @@ static int rmi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 		return ret;
 	}
 
-	if (id->driver_data)
-		data->device_flags = id->driver_data;
+	/*
+	 * RMI_DEVICE can only mean "this probe validated the RMI reports and
+	 * allocated writeReport": every bail-out to start below skips that
+	 * allocation, and device_flags left carrying RMI_DEVICE from
+	 * driver_data would send rmi_input_configured() into rmi_set_page()
+	 * with writeReport still NULL.  A bind through the new_id sysfs
+	 * attribute can supply driver_data with the bit set, so do not let
+	 * driver_data grant it.
+	 */
+	data->device_flags = id->driver_data & ~RMI_DEVICE;
 
 	/*
 	 * Check for the RMI specific report ids. If they are misisng
@@ -674,6 +725,17 @@ static int rmi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	data->output_report_size = hid_report_len(output_report);
 
+	/*
+	 * The write reports built by this driver occupy 6 bytes and the read
+	 * handshake looks at the first 3 bytes of an input report, so refuse
+	 * to drive a device whose reports cannot hold them.
+	 */
+	if (data->output_report_size < 6 || data->input_report_size < 3) {
+		hid_err(hdev, "rmi reports too small (out=%u in=%u)\n",
+			data->output_report_size, data->input_report_size);
+		goto start;
+	}
+
 	data->device_flags |= RMI_DEVICE;
 	alloc_size = data->output_report_size + data->input_report_size;
 
@@ -696,7 +758,7 @@ static int rmi_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	}
 
 	if (data->device_flags & RMI_DEVICE_HAS_PHYS_BUTTONS)
-		rmi_hid_pdata.f30_data.disable = true;
+		rmi_hid_pdata.gpio_data.disable = true;
 
 	data->xport.dev = hdev->dev.parent;
 	data->xport.pdata = rmi_hid_pdata;
@@ -718,7 +780,8 @@ static void rmi_remove(struct hid_device *hdev)
 {
 	struct rmi_data *hdata = hid_get_drvdata(hdev);
 
-	if (hdata->device_flags & RMI_DEVICE) {
+	if ((hdata->device_flags & RMI_DEVICE)
+	    && test_bit(RMI_STARTED, &hdata->flags)) {
 		clear_bit(RMI_STARTED, &hdata->flags);
 		cancel_work_sync(&hdata->reset_work);
 		rmi_unregister_transport_device(&hdata->xport);
@@ -732,6 +795,8 @@ static const struct hid_device_id rmi_id[] = {
 		.driver_data = RMI_DEVICE_HAS_PHYS_BUTTONS },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_LENOVO, USB_DEVICE_ID_LENOVO_X1_COVER) },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_PRIMAX, USB_DEVICE_ID_PRIMAX_REZEL) },
+	{ HID_USB_DEVICE(USB_VENDOR_ID_SYNAPTICS, USB_DEVICE_ID_SYNAPTICS_ACER_SWITCH5),
+		.driver_data = RMI_DEVICE_OUTPUT_SET_REPORT },
 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_RMI, HID_ANY_ID, HID_ANY_ID) },
 	{ }
 };
@@ -744,13 +809,12 @@ static struct hid_driver rmi_driver = {
 	.remove			= rmi_remove,
 	.event			= rmi_event,
 	.raw_event		= rmi_raw_event,
+	.report			= rmi_report,
 	.input_mapping		= rmi_input_mapping,
 	.input_configured	= rmi_input_configured,
-#ifdef CONFIG_PM
-	.suspend		= rmi_suspend,
-	.resume			= rmi_post_resume,
-	.reset_resume		= rmi_post_resume,
-#endif
+	.suspend		= pm_ptr(rmi_suspend),
+	.resume			= pm_ptr(rmi_post_resume),
+	.reset_resume		= pm_ptr(rmi_post_resume),
 };
 
 module_hid_driver(rmi_driver);

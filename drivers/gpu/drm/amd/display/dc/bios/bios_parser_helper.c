@@ -37,10 +37,13 @@ uint8_t *bios_get_image(struct dc_bios *bp,
 	uint32_t offset,
 	uint32_t size)
 {
-	if (bp->bios && offset + size < bp->bios_size)
-		return bp->bios + offset;
-	else
+	if (!bp->bios)
 		return NULL;
+
+	if (offset > bp->bios_size || size > bp->bios_size - offset)
+		return NULL;
+
+	return bp->bios + offset;
 }
 
 #include "reg_helper.h"
@@ -64,9 +67,10 @@ bool bios_is_accelerated_mode(
 
 
 void bios_set_scratch_acc_mode_change(
-	struct dc_bios *bios)
+	struct dc_bios *bios,
+	uint32_t state)
 {
-	REG_UPDATE(BIOS_SCRATCH_6, S6_ACC_MODE, 1);
+	REG_UPDATE(BIOS_SCRATCH_6, S6_ACC_MODE, state);
 }
 
 
@@ -77,6 +81,3 @@ void bios_set_scratch_critical_state(
 	uint32_t critial_state = state ? 1 : 0;
 	REG_UPDATE(BIOS_SCRATCH_6, S6_CRITICAL_STATE, critial_state);
 }
-
-
-

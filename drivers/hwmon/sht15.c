@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * sht15.c - support for the SHT15 Temperature and Humidity Sensor
  *
@@ -9,11 +10,7 @@
  *
  * Copyright (c) 2007 Wouter Horre
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * For further information, see the Documentation/hwmon/sht15 file.
+ * For further information, see the Documentation/hwmon/sht15.rst file.
  */
 
 #include <linux/interrupt.h>
@@ -34,6 +31,7 @@
 #include <linux/bitrev.h>
 #include <linux/gpio/consumer.h>
 #include <linux/of.h>
+#include <linux/workqueue.h>
 
 /* Commands */
 #define SHT15_MEASURE_TEMP		0x03
@@ -671,7 +669,7 @@ static inline int sht15_calc_humid(struct sht15_data *data)
 }
 
 /**
- * sht15_show_status() - show status information in sysfs
+ * sht15_status_show() - show status information in sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer where information is written to.
@@ -680,9 +678,8 @@ static inline int sht15_calc_humid(struct sht15_data *data)
  * and heater_enable sysfs attributes.
  * Returns number of bytes written into buffer, negative errno on error.
  */
-static ssize_t sht15_show_status(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
+static ssize_t sht15_status_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
 {
 	int ret;
 	struct sht15_data *data = dev_get_drvdata(dev);
@@ -694,7 +691,7 @@ static ssize_t sht15_show_status(struct device *dev,
 }
 
 /**
- * sht15_store_heater() - change heater state via sysfs
+ * sht15_status_store() - change heater state via sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer to read the new heater state from.
@@ -703,7 +700,7 @@ static ssize_t sht15_show_status(struct device *dev,
  * Will be called on write access to heater_enable sysfs attribute.
  * Returns number of bytes actually decoded, negative errno on error.
  */
-static ssize_t sht15_store_heater(struct device *dev,
+static ssize_t sht15_status_store(struct device *dev,
 				  struct device_attribute *attr,
 				  const char *buf, size_t count)
 {
@@ -729,7 +726,7 @@ static ssize_t sht15_store_heater(struct device *dev,
 }
 
 /**
- * sht15_show_temp() - show temperature measurement value in sysfs
+ * sht15_temp_show() - show temperature measurement value in sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer where measurement values are written to.
@@ -737,9 +734,8 @@ static ssize_t sht15_store_heater(struct device *dev,
  * Will be called on read access to temp1_input sysfs attribute.
  * Returns number of bytes written into buffer, negative errno on error.
  */
-static ssize_t sht15_show_temp(struct device *dev,
-			       struct device_attribute *attr,
-			       char *buf)
+static ssize_t sht15_temp_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
 	int ret;
 	struct sht15_data *data = dev_get_drvdata(dev);
@@ -752,7 +748,7 @@ static ssize_t sht15_show_temp(struct device *dev,
 }
 
 /**
- * sht15_show_humidity() - show humidity measurement value in sysfs
+ * sht15_humidity_show() - show humidity measurement value in sysfs
  * @dev:	device.
  * @attr:	device attribute.
  * @buf:	sysfs buffer where measurement values are written to.
@@ -760,9 +756,8 @@ static ssize_t sht15_show_temp(struct device *dev,
  * Will be called on read access to humidity1_input sysfs attribute.
  * Returns number of bytes written into buffer, negative errno on error.
  */
-static ssize_t sht15_show_humidity(struct device *dev,
-				   struct device_attribute *attr,
-				   char *buf)
+static ssize_t sht15_humidity_show(struct device *dev,
+				   struct device_attribute *attr, char *buf)
 {
 	int ret;
 	struct sht15_data *data = dev_get_drvdata(dev);
@@ -780,16 +775,13 @@ static ssize_t name_show(struct device *dev,
 	return sprintf(buf, "%s\n", pdev->name);
 }
 
-static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO,
-			  sht15_show_temp, NULL, 0);
-static SENSOR_DEVICE_ATTR(humidity1_input, S_IRUGO,
-			  sht15_show_humidity, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp1_fault, S_IRUGO, sht15_show_status, NULL,
-			  SHT15_STATUS_LOW_BATTERY);
-static SENSOR_DEVICE_ATTR(humidity1_fault, S_IRUGO, sht15_show_status, NULL,
-			  SHT15_STATUS_LOW_BATTERY);
-static SENSOR_DEVICE_ATTR(heater_enable, S_IRUGO | S_IWUSR, sht15_show_status,
-			  sht15_store_heater, SHT15_STATUS_HEATER);
+static SENSOR_DEVICE_ATTR_RO(temp1_input, sht15_temp, 0);
+static SENSOR_DEVICE_ATTR_RO(humidity1_input, sht15_humidity, 0);
+static SENSOR_DEVICE_ATTR_RO(temp1_fault, sht15_status,
+			     SHT15_STATUS_LOW_BATTERY);
+static SENSOR_DEVICE_ATTR_RO(humidity1_fault, sht15_status,
+			     SHT15_STATUS_LOW_BATTERY);
+static SENSOR_DEVICE_ATTR_RW(heater_enable, sht15_status, SHT15_STATUS_HEATER);
 static DEVICE_ATTR_RO(name);
 static struct attribute *sht15_attrs[] = {
 	&sensor_dev_attr_temp1_input.dev_attr.attr,
@@ -985,27 +977,22 @@ static int sht15_probe(struct platform_device *pdev)
 		goto err_release_reg;
 	}
 
-	ret = devm_request_irq(&pdev->dev, gpiod_to_irq(data->data),
-			       sht15_interrupt_fired,
-			       IRQF_TRIGGER_FALLING,
-			       "sht15 data",
-			       data);
-	if (ret) {
-		dev_err(&pdev->dev, "failed to get irq for data line\n");
+	ret = request_irq(gpiod_to_irq(data->data), sht15_interrupt_fired,
+			  IRQF_TRIGGER_FALLING, "sht15 data", data);
+	if (ret)
 		goto err_release_reg;
-	}
 	disable_irq_nosync(gpiod_to_irq(data->data));
 	ret = sht15_connection_reset(data);
 	if (ret)
-		goto err_release_reg;
+		goto err_free_irq;
 	ret = sht15_soft_reset(data);
 	if (ret)
-		goto err_release_reg;
+		goto err_free_irq;
 
 	ret = sysfs_create_group(&pdev->dev.kobj, &sht15_attr_group);
 	if (ret) {
 		dev_err(&pdev->dev, "sysfs create failed\n");
-		goto err_release_reg;
+		goto err_free_irq;
 	}
 
 	data->hwmon_dev = hwmon_device_register(data->dev);
@@ -1018,45 +1005,46 @@ static int sht15_probe(struct platform_device *pdev)
 
 err_release_sysfs_group:
 	sysfs_remove_group(&pdev->dev.kobj, &sht15_attr_group);
+err_free_irq:
+	disable_work_sync(&data->read_work);
+	free_irq(gpiod_to_irq(data->data), data);
 err_release_reg:
 	if (!IS_ERR(data->reg)) {
 		regulator_unregister_notifier(data->reg, &data->nb);
+		cancel_work_sync(&data->update_supply_work);
 		regulator_disable(data->reg);
 	}
 	return ret;
 }
 
-static int sht15_remove(struct platform_device *pdev)
+static void sht15_remove(struct platform_device *pdev)
 {
 	struct sht15_data *data = platform_get_drvdata(pdev);
+	int ret;
 
-	/*
-	 * Make sure any reads from the device are done and
-	 * prevent new ones beginning
-	 */
-	mutex_lock(&data->read_lock);
-	if (sht15_soft_reset(data)) {
-		mutex_unlock(&data->read_lock);
-		return -EFAULT;
-	}
 	hwmon_device_unregister(data->hwmon_dev);
 	sysfs_remove_group(&pdev->dev.kobj, &sht15_attr_group);
+
+	disable_work_sync(&data->read_work);
+	free_irq(gpiod_to_irq(data->data), data);
+
+	ret = sht15_soft_reset(data);
+	if (ret)
+		dev_err(&pdev->dev, "Failed to reset device (%pe)\n", ERR_PTR(ret));
+
 	if (!IS_ERR(data->reg)) {
 		regulator_unregister_notifier(data->reg, &data->nb);
+		cancel_work_sync(&data->update_supply_work);
 		regulator_disable(data->reg);
 	}
-
-	mutex_unlock(&data->read_lock);
-
-	return 0;
 }
 
 static const struct platform_device_id sht15_device_ids[] = {
-	{ "sht10", sht10 },
-	{ "sht11", sht11 },
-	{ "sht15", sht15 },
-	{ "sht71", sht71 },
-	{ "sht75", sht75 },
+	{ .name = "sht10", .driver_data = sht10 },
+	{ .name = "sht11", .driver_data = sht11 },
+	{ .name = "sht15", .driver_data = sht15 },
+	{ .name = "sht71", .driver_data = sht71 },
+	{ .name = "sht75", .driver_data = sht75 },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, sht15_device_ids);

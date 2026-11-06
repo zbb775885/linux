@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * adv7393 - ADV7393 Video Encoder Driver
  *
@@ -9,15 +10,6 @@
  * Based on ADV7343 driver,
  *
  * Copyright (C) 2009 Texas Instruments Incorporated - http://www.ti.com/
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed .as is. WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/kernel.h>
@@ -381,8 +373,7 @@ static int adv7393_initialize(struct v4l2_subdev *sd)
 	return err;
 }
 
-static int adv7393_probe(struct i2c_client *client,
-				const struct i2c_device_id *id)
+static int adv7393_probe(struct i2c_client *client)
 {
 	struct adv7393_state *state;
 	int err;
@@ -437,20 +428,18 @@ static int adv7393_probe(struct i2c_client *client,
 	return err;
 }
 
-static int adv7393_remove(struct i2c_client *client)
+static void adv7393_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct adv7393_state *state = to_state(sd);
 
 	v4l2_device_unregister_subdev(sd);
 	v4l2_ctrl_handler_free(&state->hdl);
-
-	return 0;
 }
 
 static const struct i2c_device_id adv7393_id[] = {
-	{"adv7393", 0},
-	{},
+	{ .name = "adv7393" },
+	{ }
 };
 MODULE_DEVICE_TABLE(i2c, adv7393_id);
 

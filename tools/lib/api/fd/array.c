@@ -1,7 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) 2014, Red Hat Inc, Arnaldo Carvalho de Melo <acme@redhat.com>
- *
- * Released under the GPL v2. (and only v2, not any later version)
  */
 #include "array.h"
 #include <errno.h>
@@ -9,6 +8,7 @@
 #include <poll.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 
 void fdarray__init(struct fdarray *fda, int nr_autogrow)
 {
@@ -20,7 +20,7 @@ void fdarray__init(struct fdarray *fda, int nr_autogrow)
 
 int fdarray__grow(struct fdarray *fda, int nr)
 {
-	void *priv;
+	struct priv *priv;
 	int nr_alloc = fda->nr_alloc + nr;
 	size_t psize = sizeof(fda->priv[0]) * nr_alloc;
 	size_t size  = sizeof(struct pollfd) * nr_alloc;
@@ -31,9 +31,13 @@ int fdarray__grow(struct fdarray *fda, int nr)
 
 	priv = realloc(fda->priv, psize);
 	if (priv == NULL) {
-		free(entries);
+		/* this will be freed by fdarray__exit() */
+		fda->entries = entries;
 		return -ENOMEM;
 	}
+
+	memset(&entries[fda->nr_alloc], 0, sizeof(struct pollfd) * nr);
+	memset(&priv[fda->nr_alloc], 0, sizeof(fda->priv[0]) * nr);
 
 	fda->nr_alloc = nr_alloc;
 	fda->entries  = entries;
@@ -47,7 +51,7 @@ struct fdarray *fdarray__new(int nr_alloc, int nr_autogrow)
 
 	if (fda != NULL) {
 		if (fdarray__grow(fda, nr_alloc)) {
-			free(fda);
+			fdarray__delete(fda);
 			fda = NULL;
 		} else {
 			fda->nr_autogrow = nr_autogrow;
@@ -70,7 +74,7 @@ void fdarray__delete(struct fdarray *fda)
 	free(fda);
 }
 
-int fdarray__add(struct fdarray *fda, int fd, short revents)
+int fdarray__add(struct fdarray *fda, int fd, short revents, enum fdarray_flags flags)
 {
 	int pos = fda->nr;
 
@@ -80,8 +84,26 @@ int fdarray__add(struct fdarray *fda, int fd, short revents)
 
 	fda->entries[fda->nr].fd     = fd;
 	fda->entries[fda->nr].events = revents;
+	fda->priv[fda->nr].flags = flags;
 	fda->nr++;
 	return pos;
+}
+
+int fdarray__dup_entry_from(struct fdarray *fda, int pos, struct fdarray *from)
+{
+	struct pollfd *entry;
+	int npos;
+
+	if (pos >= from->nr)
+		return -EINVAL;
+
+	entry = &from->entries[pos];
+
+	npos = fdarray__add(fda, entry->fd, entry->events, from->priv[pos].flags);
+	if (npos >= 0)
+		fda->priv[npos] = from->priv[pos];
+
+	return npos;
 }
 
 int fdarray__filter(struct fdarray *fda, short revents,
@@ -94,22 +116,34 @@ int fdarray__filter(struct fdarray *fda, short revents,
 		return 0;
 
 	for (fd = 0; fd < fda->nr; ++fd) {
+		/*
+		 * Explicitly bypass nonfilterable items (e.g. control descriptors).
+		 * This ensures their fd, events, and revents remain completely untouched.
+		 */
+		if (fda->priv[fd].flags & fdarray_flag__nonfilterable)
+			continue;
+
+		if (!fda->entries[fd].events)
+			continue;
+
 		if (fda->entries[fd].revents & revents) {
 			if (entry_destructor)
 				entry_destructor(fda, fd, arg);
 
+			/*
+			 * Set fd to -1 so poll() ignores this entry; otherwise
+			 * POLLHUP/POLLERR are still reported for events=0 fds
+			 * (POSIX: always checked), causing a poll storm.
+			 */
+			fda->entries[fd].fd = -1;
+			fda->entries[fd].revents = fda->entries[fd].events = 0;
 			continue;
-		}
-
-		if (fd != nr) {
-			fda->entries[nr] = fda->entries[fd];
-			fda->priv[nr]	 = fda->priv[fd];
 		}
 
 		++nr;
 	}
 
-	return fda->nr = nr;
+	return nr;
 }
 
 int fdarray__poll(struct fdarray *fda, int timeout)

@@ -1,20 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014, Sony Mobile Communications AB.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/pinctrl/pinctrl.h>
 
 #include "pinctrl-msm.h"
 
@@ -217,30 +208,23 @@ static const unsigned int sdc3_clk_pins[] = { 93 };
 static const unsigned int sdc3_cmd_pins[] = { 94 };
 static const unsigned int sdc3_data_pins[] = { 95 };
 
-#define FUNCTION(fname)					\
-	[APQ_MUX_##fname] = {				\
-		.name = #fname,				\
-		.groups = fname##_groups,		\
-		.ngroups = ARRAY_SIZE(fname##_groups),	\
-	}
-
 #define PINGROUP(id, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10) \
 	{						\
-		.name = "gpio" #id,			\
-		.pins = gpio##id##_pins,		\
-		.npins = ARRAY_SIZE(gpio##id##_pins),	\
+		.grp = PINCTRL_PINGROUP("gpio" #id, 	\
+			gpio##id##_pins, 		\
+			ARRAY_SIZE(gpio##id##_pins)),	\
 		.funcs = (int[]){			\
-			APQ_MUX_gpio,			\
-			APQ_MUX_##f1,			\
-			APQ_MUX_##f2,			\
-			APQ_MUX_##f3,			\
-			APQ_MUX_##f4,			\
-			APQ_MUX_##f5,			\
-			APQ_MUX_##f6,			\
-			APQ_MUX_##f7,			\
-			APQ_MUX_##f8,			\
-			APQ_MUX_##f9,			\
-			APQ_MUX_##f10,			\
+			msm_mux_gpio,			\
+			msm_mux_##f1,			\
+			msm_mux_##f2,			\
+			msm_mux_##f3,			\
+			msm_mux_##f4,			\
+			msm_mux_##f5,			\
+			msm_mux_##f6,			\
+			msm_mux_##f7,			\
+			msm_mux_##f8,			\
+			msm_mux_##f9,			\
+			msm_mux_##f10,			\
 		},					\
 		.nfuncs = 11,				\
 		.ctl_reg = 0x1000 + 0x10 * id,		\
@@ -267,9 +251,9 @@ static const unsigned int sdc3_data_pins[] = { 95 };
 
 #define SDC_PINGROUP(pg_name, ctl, pull, drv)		\
 	{						\
-		.name = #pg_name,			\
-		.pins = pg_name##_pins,			\
-		.npins = ARRAY_SIZE(pg_name##_pins),	\
+		.grp = PINCTRL_PINGROUP(#pg_name, 	\
+			pg_name##_pins, 		\
+			ARRAY_SIZE(pg_name##_pins)),	\
 		.ctl_reg = ctl,				\
 		.io_reg = 0,				\
 		.intr_cfg_reg = 0,			\
@@ -292,48 +276,48 @@ static const unsigned int sdc3_data_pins[] = { 95 };
 	}
 
 enum apq8064_functions {
-	APQ_MUX_cam_mclk,
-	APQ_MUX_codec_mic_i2s,
-	APQ_MUX_codec_spkr_i2s,
-	APQ_MUX_gp_clk_0a,
-	APQ_MUX_gp_clk_0b,
-	APQ_MUX_gp_clk_1a,
-	APQ_MUX_gp_clk_1b,
-	APQ_MUX_gp_clk_2a,
-	APQ_MUX_gp_clk_2b,
-	APQ_MUX_gpio,
-	APQ_MUX_gsbi1,
-	APQ_MUX_gsbi2,
-	APQ_MUX_gsbi3,
-	APQ_MUX_gsbi4,
-	APQ_MUX_gsbi4_cam_i2c,
-	APQ_MUX_gsbi5,
-	APQ_MUX_gsbi5_spi_cs1,
-	APQ_MUX_gsbi5_spi_cs2,
-	APQ_MUX_gsbi5_spi_cs3,
-	APQ_MUX_gsbi6,
-	APQ_MUX_gsbi6_spi_cs1,
-	APQ_MUX_gsbi6_spi_cs2,
-	APQ_MUX_gsbi6_spi_cs3,
-	APQ_MUX_gsbi7,
-	APQ_MUX_gsbi7_spi_cs1,
-	APQ_MUX_gsbi7_spi_cs2,
-	APQ_MUX_gsbi7_spi_cs3,
-	APQ_MUX_gsbi_cam_i2c,
-	APQ_MUX_hdmi,
-	APQ_MUX_mi2s,
-	APQ_MUX_riva_bt,
-	APQ_MUX_riva_fm,
-	APQ_MUX_riva_wlan,
-	APQ_MUX_sdc2,
-	APQ_MUX_sdc4,
-	APQ_MUX_slimbus,
-	APQ_MUX_spkr_i2s,
-	APQ_MUX_tsif1,
-	APQ_MUX_tsif2,
-	APQ_MUX_usb2_hsic,
-	APQ_MUX_ps_hold,
-	APQ_MUX_NA,
+	msm_mux_cam_mclk,
+	msm_mux_codec_mic_i2s,
+	msm_mux_codec_spkr_i2s,
+	msm_mux_gp_clk_0a,
+	msm_mux_gp_clk_0b,
+	msm_mux_gp_clk_1a,
+	msm_mux_gp_clk_1b,
+	msm_mux_gp_clk_2a,
+	msm_mux_gp_clk_2b,
+	msm_mux_gpio,
+	msm_mux_gsbi1,
+	msm_mux_gsbi2,
+	msm_mux_gsbi3,
+	msm_mux_gsbi4,
+	msm_mux_gsbi4_cam_i2c,
+	msm_mux_gsbi5,
+	msm_mux_gsbi5_spi_cs1,
+	msm_mux_gsbi5_spi_cs2,
+	msm_mux_gsbi5_spi_cs3,
+	msm_mux_gsbi6,
+	msm_mux_gsbi6_spi_cs1,
+	msm_mux_gsbi6_spi_cs2,
+	msm_mux_gsbi6_spi_cs3,
+	msm_mux_gsbi7,
+	msm_mux_gsbi7_spi_cs1,
+	msm_mux_gsbi7_spi_cs2,
+	msm_mux_gsbi7_spi_cs3,
+	msm_mux_gsbi_cam_i2c,
+	msm_mux_hdmi,
+	msm_mux_mi2s,
+	msm_mux_riva_bt,
+	msm_mux_riva_fm,
+	msm_mux_riva_wlan,
+	msm_mux_sdc2,
+	msm_mux_sdc4,
+	msm_mux_slimbus,
+	msm_mux_spkr_i2s,
+	msm_mux_tsif1,
+	msm_mux_tsif2,
+	msm_mux_usb2_hsic,
+	msm_mux_ps_hold,
+	msm_mux_NA,
 };
 
 static const char * const cam_mclk_groups[] = {
@@ -472,48 +456,48 @@ static const char * const usb2_hsic_groups[] = {
 	"gpio88", "gpio89"
 };
 
-static const struct msm_function apq8064_functions[] = {
-	FUNCTION(cam_mclk),
-	FUNCTION(codec_mic_i2s),
-	FUNCTION(codec_spkr_i2s),
-	FUNCTION(gp_clk_0a),
-	FUNCTION(gp_clk_0b),
-	FUNCTION(gp_clk_1a),
-	FUNCTION(gp_clk_1b),
-	FUNCTION(gp_clk_2a),
-	FUNCTION(gp_clk_2b),
-	FUNCTION(gpio),
-	FUNCTION(gsbi1),
-	FUNCTION(gsbi2),
-	FUNCTION(gsbi3),
-	FUNCTION(gsbi4),
-	FUNCTION(gsbi4_cam_i2c),
-	FUNCTION(gsbi5),
-	FUNCTION(gsbi5_spi_cs1),
-	FUNCTION(gsbi5_spi_cs2),
-	FUNCTION(gsbi5_spi_cs3),
-	FUNCTION(gsbi6),
-	FUNCTION(gsbi6_spi_cs1),
-	FUNCTION(gsbi6_spi_cs2),
-	FUNCTION(gsbi6_spi_cs3),
-	FUNCTION(gsbi7),
-	FUNCTION(gsbi7_spi_cs1),
-	FUNCTION(gsbi7_spi_cs2),
-	FUNCTION(gsbi7_spi_cs3),
-	FUNCTION(gsbi_cam_i2c),
-	FUNCTION(hdmi),
-	FUNCTION(mi2s),
-	FUNCTION(riva_bt),
-	FUNCTION(riva_fm),
-	FUNCTION(riva_wlan),
-	FUNCTION(sdc2),
-	FUNCTION(sdc4),
-	FUNCTION(slimbus),
-	FUNCTION(spkr_i2s),
-	FUNCTION(tsif1),
-	FUNCTION(tsif2),
-	FUNCTION(usb2_hsic),
-	FUNCTION(ps_hold),
+static const struct pinfunction apq8064_functions[] = {
+	MSM_PIN_FUNCTION(cam_mclk),
+	MSM_PIN_FUNCTION(codec_mic_i2s),
+	MSM_PIN_FUNCTION(codec_spkr_i2s),
+	MSM_PIN_FUNCTION(gp_clk_0a),
+	MSM_PIN_FUNCTION(gp_clk_0b),
+	MSM_PIN_FUNCTION(gp_clk_1a),
+	MSM_PIN_FUNCTION(gp_clk_1b),
+	MSM_PIN_FUNCTION(gp_clk_2a),
+	MSM_PIN_FUNCTION(gp_clk_2b),
+	MSM_PIN_FUNCTION(gpio),
+	MSM_PIN_FUNCTION(gsbi1),
+	MSM_PIN_FUNCTION(gsbi2),
+	MSM_PIN_FUNCTION(gsbi3),
+	MSM_PIN_FUNCTION(gsbi4),
+	MSM_PIN_FUNCTION(gsbi4_cam_i2c),
+	MSM_PIN_FUNCTION(gsbi5),
+	MSM_PIN_FUNCTION(gsbi5_spi_cs1),
+	MSM_PIN_FUNCTION(gsbi5_spi_cs2),
+	MSM_PIN_FUNCTION(gsbi5_spi_cs3),
+	MSM_PIN_FUNCTION(gsbi6),
+	MSM_PIN_FUNCTION(gsbi6_spi_cs1),
+	MSM_PIN_FUNCTION(gsbi6_spi_cs2),
+	MSM_PIN_FUNCTION(gsbi6_spi_cs3),
+	MSM_PIN_FUNCTION(gsbi7),
+	MSM_PIN_FUNCTION(gsbi7_spi_cs1),
+	MSM_PIN_FUNCTION(gsbi7_spi_cs2),
+	MSM_PIN_FUNCTION(gsbi7_spi_cs3),
+	MSM_PIN_FUNCTION(gsbi_cam_i2c),
+	MSM_PIN_FUNCTION(hdmi),
+	MSM_PIN_FUNCTION(mi2s),
+	MSM_PIN_FUNCTION(riva_bt),
+	MSM_PIN_FUNCTION(riva_fm),
+	MSM_PIN_FUNCTION(riva_wlan),
+	MSM_PIN_FUNCTION(sdc2),
+	MSM_PIN_FUNCTION(sdc4),
+	MSM_PIN_FUNCTION(slimbus),
+	MSM_PIN_FUNCTION(spkr_i2s),
+	MSM_PIN_FUNCTION(tsif1),
+	MSM_PIN_FUNCTION(tsif2),
+	MSM_PIN_FUNCTION(usb2_hsic),
+	MSM_PIN_FUNCTION(ps_hold),
 };
 
 static const struct msm_pingroup apq8064_groups[] = {
@@ -638,6 +622,7 @@ static const struct of_device_id apq8064_pinctrl_of_match[] = {
 	{ .compatible = "qcom,apq8064-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, apq8064_pinctrl_of_match);
 
 static struct platform_driver apq8064_pinctrl_driver = {
 	.driver = {
@@ -645,7 +630,6 @@ static struct platform_driver apq8064_pinctrl_driver = {
 		.of_match_table = apq8064_pinctrl_of_match,
 	},
 	.probe = apq8064_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init apq8064_pinctrl_init(void)
@@ -663,4 +647,3 @@ module_exit(apq8064_pinctrl_exit);
 MODULE_AUTHOR("Bjorn Andersson <bjorn.andersson@sonymobile.com>");
 MODULE_DESCRIPTION("Qualcomm APQ8064 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, apq8064_pinctrl_of_match);

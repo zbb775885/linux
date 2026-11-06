@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Watchdog driver for the RTC based watchdog in STMP3xxx and i.MX23/28
  *
  * Author: Wolfram Sang <kernel@pengutronix.de>
  *
  * Copyright (C) 2011-12 Wolfram Sang, Pengutronix
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -16,6 +13,7 @@
 #include <linux/stmp3xxx_rtc_wdt.h>
 #include <linux/notifier.h>
 #include <linux/reboot.h>
+#include <linux/stringify.h>
 
 #define WDOG_TICK_RATE 1000 /* 1 kHz clock */
 #define STMP3XXX_DEFAULT_TIMEOUT 19
@@ -24,8 +22,8 @@
 static int heartbeat = STMP3XXX_DEFAULT_TIMEOUT;
 module_param(heartbeat, uint, 0);
 MODULE_PARM_DESC(heartbeat, "Watchdog heartbeat period in seconds from 1 to "
-		 __MODULE_STRING(STMP3XXX_MAX_TIMEOUT) ", default "
-		 __MODULE_STRING(STMP3XXX_DEFAULT_TIMEOUT));
+		 __stringify(STMP3XXX_MAX_TIMEOUT) ", default "
+		 __stringify(STMP3XXX_DEFAULT_TIMEOUT));
 
 static int wdt_start(struct watchdog_device *wdd)
 {
@@ -92,35 +90,32 @@ static struct notifier_block wdt_notifier = {
 
 static int stmp3xxx_wdt_probe(struct platform_device *pdev)
 {
+	struct device *dev = &pdev->dev;
 	int ret;
 
-	watchdog_set_drvdata(&stmp3xxx_wdd, &pdev->dev);
+	watchdog_set_drvdata(&stmp3xxx_wdd, dev);
 
 	stmp3xxx_wdd.timeout = clamp_t(unsigned, heartbeat, 1, STMP3XXX_MAX_TIMEOUT);
-	stmp3xxx_wdd.parent = &pdev->dev;
+	stmp3xxx_wdd.parent = dev;
 
-	ret = watchdog_register_device(&stmp3xxx_wdd);
-	if (ret < 0) {
-		dev_err(&pdev->dev, "cannot register watchdog device\n");
+	ret = devm_watchdog_register_device(dev, &stmp3xxx_wdd);
+	if (ret < 0)
 		return ret;
-	}
 
 	if (register_reboot_notifier(&wdt_notifier))
-		dev_warn(&pdev->dev, "cannot register reboot notifier\n");
+		dev_warn(dev, "cannot register reboot notifier\n");
 
-	dev_info(&pdev->dev, "initialized watchdog with heartbeat %ds\n",
-			stmp3xxx_wdd.timeout);
+	dev_info(dev, "initialized watchdog with heartbeat %ds\n",
+		 stmp3xxx_wdd.timeout);
 	return 0;
 }
 
-static int stmp3xxx_wdt_remove(struct platform_device *pdev)
+static void stmp3xxx_wdt_remove(struct platform_device *pdev)
 {
 	unregister_reboot_notifier(&wdt_notifier);
-	watchdog_unregister_device(&stmp3xxx_wdd);
-	return 0;
 }
 
-static int __maybe_unused stmp3xxx_wdt_suspend(struct device *dev)
+static int stmp3xxx_wdt_suspend(struct device *dev)
 {
 	struct watchdog_device *wdd = &stmp3xxx_wdd;
 
@@ -130,7 +125,7 @@ static int __maybe_unused stmp3xxx_wdt_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused stmp3xxx_wdt_resume(struct device *dev)
+static int stmp3xxx_wdt_resume(struct device *dev)
 {
 	struct watchdog_device *wdd = &stmp3xxx_wdd;
 
@@ -140,13 +135,13 @@ static int __maybe_unused stmp3xxx_wdt_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(stmp3xxx_wdt_pm_ops,
+static DEFINE_SIMPLE_DEV_PM_OPS(stmp3xxx_wdt_pm_ops,
 			 stmp3xxx_wdt_suspend, stmp3xxx_wdt_resume);
 
 static struct platform_driver stmp3xxx_wdt_driver = {
 	.driver = {
 		.name = "stmp3xxx_rtc_wdt",
-		.pm = &stmp3xxx_wdt_pm_ops,
+		.pm = pm_sleep_ptr(&stmp3xxx_wdt_pm_ops),
 	},
 	.probe = stmp3xxx_wdt_probe,
 	.remove = stmp3xxx_wdt_remove,

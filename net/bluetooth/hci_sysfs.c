@@ -6,12 +6,17 @@
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
-static struct class *bt_class;
+static const struct class bt_class = {
+	.name = "bluetooth",
+};
 
 static void bt_link_release(struct device *dev)
 {
 	struct hci_conn *conn = to_hci_conn(dev);
+	struct device *parent = dev->parent;
+
 	kfree(conn);
+	put_device(parent);
 }
 
 static const struct device_type bt_link = {
@@ -24,7 +29,7 @@ static const struct device_type bt_link = {
  * is down, and sysfs doesn't support move zombie device,
  * so we should move the device before conn device is destroyed.
  */
-static int __match_tty(struct device *dev, void *data)
+static int __match_tty(struct device *dev, const void *data)
 {
 	return !strncmp(dev_name(dev), "rfcomm", 6);
 }
@@ -33,11 +38,11 @@ void hci_conn_init_sysfs(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
 
-	BT_DBG("conn %p", conn);
+	bt_dev_dbg(hdev, "conn %p", conn);
 
 	conn->dev.type = &bt_link;
-	conn->dev.class = bt_class;
-	conn->dev.parent = &hdev->dev;
+	conn->dev.class = &bt_class;
+	conn->dev.parent = get_device(&hdev->dev);
 
 	device_initialize(&conn->dev);
 }
@@ -46,25 +51,34 @@ void hci_conn_add_sysfs(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
 
-	BT_DBG("conn %p", conn);
+	bt_dev_dbg(hdev, "conn %p", conn);
+
+	if (device_is_registered(&conn->dev))
+		return;
 
 	dev_set_name(&conn->dev, "%s:%d", hdev->name, conn->handle);
 
-	if (device_add(&conn->dev) < 0) {
+	if (device_add(&conn->dev) < 0)
 		bt_dev_err(hdev, "failed to register connection device");
-		return;
-	}
-
-	hci_dev_hold(hdev);
 }
 
 void hci_conn_del_sysfs(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
 
-	if (!device_is_registered(&conn->dev))
-		return;
+	bt_dev_dbg(hdev, "conn %p", conn);
 
+	if (!device_is_registered(&conn->dev)) {
+		/* If device_add() has *not* succeeded, use *only* put_device()
+		 * to drop the reference count.
+		 */
+		put_device(&conn->dev);
+		return;
+	}
+
+	/* If there are devices using the connection as parent reset it to NULL
+	 * before unregistering the device.
+	 */
 	while (1) {
 		struct device *dev;
 
@@ -75,21 +89,44 @@ void hci_conn_del_sysfs(struct hci_conn *conn)
 		put_device(dev);
 	}
 
-	device_del(&conn->dev);
-
-	hci_dev_put(hdev);
+	device_unregister(&conn->dev);
 }
 
 static void bt_host_release(struct device *dev)
 {
 	struct hci_dev *hdev = to_hci_dev(dev);
-	kfree(hdev);
+
+	if (hci_dev_test_flag(hdev, HCI_UNREGISTER)) {
+		hci_release_dev(hdev);
+	} else {
+		cleanup_srcu_struct(&hdev->srcu);
+		kfree(hdev);
+	}
 	module_put(THIS_MODULE);
 }
+
+static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct hci_dev *hdev = to_hci_dev(dev);
+
+	if (hdev->reset)
+		hdev->reset(hdev);
+
+	return count;
+}
+static DEVICE_ATTR_WO(reset);
+
+static struct attribute *bt_host_attrs[] = {
+	&dev_attr_reset.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(bt_host);
 
 static const struct device_type bt_host = {
 	.name    = "host",
 	.release = bt_host_release,
+	.groups = bt_host_groups,
 };
 
 void hci_init_sysfs(struct hci_dev *hdev)
@@ -97,7 +134,7 @@ void hci_init_sysfs(struct hci_dev *hdev)
 	struct device *dev = &hdev->dev;
 
 	dev->type = &bt_host;
-	dev->class = bt_class;
+	dev->class = &bt_class;
 
 	__module_get(THIS_MODULE);
 	device_initialize(dev);
@@ -105,12 +142,10 @@ void hci_init_sysfs(struct hci_dev *hdev)
 
 int __init bt_sysfs_init(void)
 {
-	bt_class = class_create(THIS_MODULE, "bluetooth");
-
-	return PTR_ERR_OR_ZERO(bt_class);
+	return class_register(&bt_class);
 }
 
 void bt_sysfs_cleanup(void)
 {
-	class_destroy(bt_class);
+	class_unregister(&bt_class);
 }

@@ -31,15 +31,7 @@
  * Private functions
  ******************************************************************************/
 
-static void destruct(struct dc_sink *sink)
-{
-	if (sink->dc_container_id) {
-		kfree(sink->dc_container_id);
-		sink->dc_container_id = NULL;
-	}
-}
-
-static bool construct(struct dc_sink *sink, const struct dc_sink_init_data *init_params)
+static bool dc_sink_construct(struct dc_sink *sink, const struct dc_sink_init_data *init_params)
 {
 
 	struct dc_link *link = init_params->link;
@@ -53,6 +45,10 @@ static bool construct(struct dc_sink *sink, const struct dc_sink_init_data *init
 	sink->dongle_max_pix_clk = init_params->dongle_max_pix_clk;
 	sink->converter_disable_audio = init_params->converter_disable_audio;
 	sink->dc_container_id = NULL;
+	sink->sink_id = init_params->link->ctx->dc_sink_id_count;
+	// increment dc_sink_id_count because we don't want two sinks with same ID
+	// unless they are actually the same
+	init_params->link->ctx->dc_sink_id_count++;
 
 	return true;
 }
@@ -65,11 +61,12 @@ void dc_sink_retain(struct dc_sink *sink)
 {
 	kref_get(&sink->refcount);
 }
+EXPORT_IF_KUNIT(dc_sink_retain);
 
 static void dc_sink_free(struct kref *kref)
 {
 	struct dc_sink *sink = container_of(kref, struct dc_sink, refcount);
-	destruct(sink);
+	kfree(sink->dc_container_id);
 	kfree(sink);
 }
 
@@ -77,15 +74,16 @@ void dc_sink_release(struct dc_sink *sink)
 {
 	kref_put(&sink->refcount, dc_sink_free);
 }
+EXPORT_IF_KUNIT(dc_sink_release);
 
 struct dc_sink *dc_sink_create(const struct dc_sink_init_data *init_params)
 {
-	struct dc_sink *sink = kzalloc(sizeof(*sink), GFP_KERNEL);
+	struct dc_sink *sink = kzalloc_obj(*sink);
 
 	if (NULL == sink)
 		goto alloc_fail;
 
-	if (false == construct(sink, init_params))
+	if (false == dc_sink_construct(sink, init_params))
 		goto construct_fail;
 
 	kref_init(&sink->refcount);
@@ -98,6 +96,7 @@ construct_fail:
 alloc_fail:
 	return NULL;
 }
+EXPORT_IF_KUNIT(dc_sink_create);
 
 /*******************************************************************************
  * Protected functions - visible only inside of DC (not visible in DM)

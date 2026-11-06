@@ -2,7 +2,7 @@
 // For Philips TEA5767 FM Chip used on some TV Cards like Prolink Pixelview
 // I2C address is always 0xC0.
 //
-// Copyright (c) 2005 Mauro Carvalho Chehab (mchehab@infradead.org)
+// Copyright (c) 2005 Mauro Carvalho Chehab <mchehab@kernel.org>
 //
 // tea5767 autodetection thanks to Torsten Seeboth and Atsushi Nakagawa
 // from their contributions on DScaler.
@@ -44,7 +44,7 @@ struct tea5767_priv {
 
 /* Third register */
 
-/* Station search from botton to up */
+/* Station search from bottom to up */
 #define TEA5767_SEARCH_UP	0x80
 
 /* Searches with ADC output = 10 */
@@ -183,7 +183,7 @@ static void tea5767_status_dump(struct tea5767_priv *priv,
 		   (buffer[4] & TEA5767_RESERVED_MASK));
 }
 
-/* Freq should be specifyed at 62.5 Hz */
+/* Freq should be specified at 62.5 Hz */
 static int set_radio_freq(struct dvb_frontend *fe,
 			  struct analog_parameters *params)
 {
@@ -441,7 +441,7 @@ struct dvb_frontend *tea5767_attach(struct dvb_frontend *fe,
 {
 	struct tea5767_priv *priv = NULL;
 
-	priv = kzalloc(sizeof(struct tea5767_priv), GFP_KERNEL);
+	priv = kzalloc_obj(struct tea5767_priv);
 	if (priv == NULL)
 		return NULL;
 	fe->tuner_priv = priv;
@@ -469,5 +469,5 @@ EXPORT_SYMBOL_GPL(tea5767_attach);
 EXPORT_SYMBOL_GPL(tea5767_autodetection);
 
 MODULE_DESCRIPTION("Philips TEA5767 FM tuner driver");
-MODULE_AUTHOR("Mauro Carvalho Chehab <mchehab@infradead.org>");
+MODULE_AUTHOR("Mauro Carvalho Chehab <mchehab@kernel.org>");
 MODULE_LICENSE("GPL v2");

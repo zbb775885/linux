@@ -20,11 +20,13 @@ void calc_runnable_avg_yN_inv(void)
 	int i;
 	unsigned int x;
 
-	printf("static const u32 runnable_avg_yN_inv[] = {");
+	/* To silence -Wunused-but-set-variable warnings. */
+	printf("static const u32 runnable_avg_yN_inv[] __maybe_unused = {");
 	for (i = 0; i < HALFLIFE; i++) {
 		x = ((1UL<<32)-1)*pow(y, i);
 
-		if (i % 6 == 0) printf("\n\t");
+		if (i % 6 == 0)
+			printf("\n\t");
 		printf("0x%8x, ", x);
 	}
 	printf("\n};\n\n");

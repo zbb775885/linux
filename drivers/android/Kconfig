@@ -1,18 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0
 menu "Android"
 
-config ANDROID
-	bool "Android Drivers"
-	---help---
-	  Enable support for various drivers needed on the Android platform
-
-if ANDROID
-
-config ANDROID_BINDER_IPC
+config ANDROID_BINDER_IPC_RUST
 	bool "Android Binder IPC Driver"
 	depends on MMU
+	depends on NET
+	depends on RUST
 	default n
-	---help---
+	help
 	  Binder is used in Android for both communication between processes,
 	  and remote method invocation.
 
@@ -22,39 +17,14 @@ config ANDROID_BINDER_IPC
 
 config ANDROID_BINDER_DEVICES
 	string "Android Binder devices"
-	depends on ANDROID_BINDER_IPC
+	depends on ANDROID_BINDER_IPC_RUST
 	default "binder,hwbinder,vndbinder"
-	---help---
+	help
 	  Default value for the binder.devices parameter.
 
 	  The binder.devices parameter is a comma-separated list of strings
 	  that specifies the names of the binder device nodes that will be
 	  created. Each binder device has its own context manager, and is
 	  therefore logically separated from the other devices.
-
-config ANDROID_BINDER_IPC_32BIT
-	bool "Use old (Android 4.4 and earlier) 32-bit binder API"
-	depends on !64BIT && ANDROID_BINDER_IPC
-	default y
-	---help---
-	  The Binder API has been changed to support both 32 and 64bit
-	  applications in a mixed environment.
-
-	  Enable this to support an old 32-bit Android user-space (v4.4 and
-	  earlier).
-
-	  Note that enabling this will break newer Android user-space.
-
-config ANDROID_BINDER_IPC_SELFTEST
-	bool "Android Binder IPC Driver Selftest"
-	depends on ANDROID_BINDER_IPC
-	---help---
-	  This feature allows binder selftest to run.
-
-	  Binder selftest checks the allocation and free of binder buffers
-	  exhaustively with combinations of various buffer sizes and
-	  alignments.
-
-endif # if ANDROID
 
 endmenu

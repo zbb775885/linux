@@ -1,64 +1,23 @@
-/******************************************************************************
- *
- * This file is provided under a dual BSD/GPLv2 license.  When using or
- * redistributing this file, you may do so under either license.
- *
- * GPL LICENSE SUMMARY
- *
- * Copyright(c) 2017 Intel Deutschland GmbH
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * BSD LICENSE
- *
- * Copyright(c) 2017 Intel Deutschland GmbH
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *
- *  * Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- *  * Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- *  * Neither the name Intel Corporation nor the names of its
- *    contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *****************************************************************************/
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Copyright (C) 2017 Intel Deutschland GmbH
+ * Copyright (C) 2018-2026 Intel Corporation
+ */
 #include "iwl-trans.h"
 #include "iwl-prph.h"
 #include "iwl-context-info.h"
+#include "iwl-context-info-v2.h"
 #include "internal.h"
+#include "fw/dbg.h"
+
+#define FW_RESET_TIMEOUT (HZ / 5)
 
 /*
  * Start up NIC's basic functionality after it has been reset
  * (e.g. after platform boot, or shutdown via iwl_pcie_apm_stop())
  * NOTE:  This does not load uCode nor start the embedded processor
  */
-static int iwl_pcie_gen2_apm_init(struct iwl_trans *trans)
+int iwl_pcie_gen2_apm_init(struct iwl_trans *trans)
 {
 	int ret = 0;
 
@@ -73,39 +32,24 @@ static int iwl_pcie_gen2_apm_init(struct iwl_trans *trans)
 	 * Disable L0s without affecting L1;
 	 * don't wait for ICH L0s (ICH bug W/A)
 	 */
-	iwl_set_bit(trans, CSR_GIO_CHICKEN_BITS,
-		    CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX);
+	iwl_trans_set_bit(trans, CSR_GIO_CHICKEN_BITS,
+			  CSR_GIO_CHICKEN_BITS_REG_BIT_L1A_NO_L0S_RX);
 
 	/* Set FH wait threshold to maximum (HW error during stress W/A) */
-	iwl_set_bit(trans, CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
+	iwl_trans_set_bit(trans, CSR_DBG_HPET_MEM_REG, CSR_DBG_HPET_MEM_REG_VAL);
 
 	/*
 	 * Enable HAP INTA (interrupt from management bus) to
 	 * wake device's PCI Express link L1a -> L0s
 	 */
-	iwl_set_bit(trans, CSR_HW_IF_CONFIG_REG,
-		    CSR_HW_IF_CONFIG_REG_BIT_HAP_WAKE_L1A);
+	iwl_trans_set_bit(trans, CSR_HW_IF_CONFIG_REG,
+			  CSR_HW_IF_CONFIG_REG_HAP_WAKE);
 
 	iwl_pcie_apm_config(trans);
 
-	/*
-	 * Set "initialization complete" bit to move adapter from
-	 * D0U* --> D0A* (powered-up active) state.
-	 */
-	iwl_set_bit(trans, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
-
-	/*
-	 * Wait for clock stabilization; once stabilized, access to
-	 * device-internal resources is supported, e.g. iwl_write_prph()
-	 * and accesses to uCode SRAM.
-	 */
-	ret = iwl_poll_bit(trans, CSR_GP_CNTRL,
-			   CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
-			   CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000);
-	if (ret < 0) {
-		IWL_DEBUG_INFO(trans, "Failed to init the card\n");
+	ret = iwl_trans_activate_nic(trans);
+	if (ret)
 		return ret;
-	}
 
 	set_bit(STATUS_DEVICE_ENABLED, &trans->status);
 
@@ -121,14 +65,14 @@ static void iwl_pcie_gen2_apm_stop(struct iwl_trans *trans, bool op_mode_leave)
 			iwl_pcie_gen2_apm_init(trans);
 
 		/* inform ME that we are leaving */
-		iwl_set_bit(trans, CSR_DBG_LINK_PWR_MGMT_REG,
-			    CSR_RESET_LINK_PWR_MGMT_DISABLED);
-		iwl_set_bit(trans, CSR_HW_IF_CONFIG_REG,
-			    CSR_HW_IF_CONFIG_REG_PREPARE |
-			    CSR_HW_IF_CONFIG_REG_ENABLE_PME);
+		iwl_trans_set_bit(trans, CSR_DBG_LINK_PWR_MGMT_REG,
+				  CSR_RESET_LINK_PWR_MGMT_DISABLED);
+		iwl_trans_set_bit(trans, CSR_HW_IF_CONFIG_REG,
+				  CSR_HW_IF_CONFIG_REG_WAKE_ME |
+				  CSR_HW_IF_CONFIG_REG_WAKE_ME_PCIE_OWNER_EN);
 		mdelay(1);
-		iwl_clear_bit(trans, CSR_DBG_LINK_PWR_MGMT_REG,
-			      CSR_RESET_LINK_PWR_MGMT_DISABLED);
+		iwl_trans_clear_bit(trans, CSR_DBG_LINK_PWR_MGMT_REG,
+				    CSR_RESET_LINK_PWR_MGMT_DISABLED);
 		mdelay(5);
 	}
 
@@ -137,16 +81,80 @@ static void iwl_pcie_gen2_apm_stop(struct iwl_trans *trans, bool op_mode_leave)
 	/* Stop device's DMA activity */
 	iwl_pcie_apm_stop_master(trans);
 
-	iwl_trans_sw_reset(trans);
+	iwl_trans_pcie_sw_reset(trans, false);
 
 	/*
 	 * Clear "initialization complete" bit to move adapter from
 	 * D0A* (powered-up Active) --> D0U* (Uninitialized) state.
 	 */
-	iwl_clear_bit(trans, CSR_GP_CNTRL, CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_BZ)
+		iwl_trans_clear_bit(trans, CSR_GP_CNTRL,
+				    CSR_GP_CNTRL_REG_FLAG_MAC_INIT);
+	else
+		iwl_trans_clear_bit(trans, CSR_GP_CNTRL,
+				    CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
 }
 
-void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans, bool low_power)
+static void
+_iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans,
+				   bool dump_on_timeout)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+	int ret;
+
+	trans_pcie->fw_reset_state = FW_RESET_REQUESTED;
+
+	if (trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_AX210)
+		iwl_trans_write_umac_prph(trans, UREG_NIC_SET_NMI_DRIVER,
+					  UREG_NIC_SET_NMI_DRIVER_RESET_HANDSHAKE);
+	else if (trans->mac_cfg->device_family == IWL_DEVICE_FAMILY_AX210)
+		iwl_trans_write_umac_prph(trans, UREG_DOORBELL_TO_ISR6,
+					  UREG_DOORBELL_TO_ISR6_RESET_HANDSHAKE);
+	else
+		iwl_trans_pcie_write32(trans, CSR_DOORBELL_VECTOR,
+				       UREG_DOORBELL_TO_ISR6_RESET_HANDSHAKE);
+
+	/* wait 200ms */
+	ret = wait_event_timeout(trans_pcie->fw_reset_waitq,
+				 trans_pcie->fw_reset_state != FW_RESET_REQUESTED,
+				 FW_RESET_TIMEOUT);
+	if (!ret || trans_pcie->fw_reset_state == FW_RESET_ERROR) {
+		bool reset_done;
+		u32 inta_hw;
+
+		if (trans_pcie->msix_enabled) {
+			inta_hw = iwl_trans_pcie_read32(trans, CSR_MSIX_HW_INT_CAUSES_AD);
+			reset_done =
+				inta_hw & MSIX_HW_INT_CAUSES_REG_RESET_DONE;
+		} else {
+			inta_hw = iwl_trans_pcie_read32(trans, CSR_INT);
+			reset_done = inta_hw & CSR_INT_BIT_RESET_DONE;
+		}
+
+		IWL_ERR(trans,
+			"timeout waiting for FW reset ACK (inta_hw=0x%x, reset_done %d)\n",
+			inta_hw, reset_done);
+
+		if (!reset_done && dump_on_timeout) {
+			struct iwl_fw_error_dump_mode mode = {
+				.type = IWL_ERR_TYPE_RESET_HS_TIMEOUT,
+				.context = IWL_ERR_CONTEXT_FROM_OPMODE,
+			};
+			iwl_op_mode_nic_error(trans->op_mode,
+					      IWL_ERR_TYPE_RESET_HS_TIMEOUT);
+			iwl_op_mode_dump_error(trans->op_mode, &mode);
+		}
+	}
+
+	trans_pcie->fw_reset_state = FW_RESET_IDLE;
+}
+
+void iwl_trans_pcie_fw_reset_handshake(struct iwl_trans *trans)
+{
+	_iwl_trans_pcie_fw_reset_handshake(trans, false);
+}
+
+static void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
 
@@ -155,12 +163,17 @@ void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans, bool low_power)
 	if (trans_pcie->is_down)
 		return;
 
-	trans_pcie->is_down = true;
+	if (trans->state >= IWL_TRANS_FW_STARTED &&
+	    trans->conf.fw_reset_handshake) {
+		/*
+		 * Reset handshake can dump firmware on timeout, but that
+		 * should assume that the firmware is already dead.
+		 */
+		trans->state = IWL_TRANS_NO_FW;
+		_iwl_trans_pcie_fw_reset_handshake(trans, true);
+	}
 
-	/* Stop dbgc before stopping device */
-	iwl_write_prph(trans, DBGC_IN_SAMPLE, 0);
-	udelay(100);
-	iwl_write_prph(trans, DBGC_OUT_CTRL, 0);
+	trans_pcie->is_down = true;
 
 	/* tell the device to stop sending interrupts */
 	iwl_disable_interrupts(trans);
@@ -178,21 +191,23 @@ void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans, bool low_power)
 	if (test_and_clear_bit(STATUS_DEVICE_ENABLED, &trans->status)) {
 		IWL_DEBUG_INFO(trans,
 			       "DEVICE_ENABLED bit was set and is now cleared\n");
-		iwl_pcie_gen2_tx_stop(trans);
+		iwl_pcie_synchronize_irqs(trans);
+		iwl_pcie_rx_napi_sync(trans);
+		iwl_txq_gen2_tx_free(trans);
 		iwl_pcie_rx_stop(trans);
 	}
 
 	iwl_pcie_ctxt_info_free_paging(trans);
-	iwl_pcie_ctxt_info_free(trans);
-
-	/* Make sure (redundant) we've released our request to stay awake */
-	iwl_clear_bit(trans, CSR_GP_CNTRL,
-		      CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_AX210)
+		iwl_pcie_ctxt_info_v2_free(trans, false);
+	else
+		iwl_pcie_ctxt_info_free(trans);
 
 	/* Stop the device, and put it in low power state */
 	iwl_pcie_gen2_apm_stop(trans, false);
 
-	iwl_trans_sw_reset(trans);
+	/* re-take ownership to prevent other users from stealing the device */
+	iwl_trans_pcie_sw_reset(trans, true);
 
 	/*
 	 * Upon stop, the IVAR table gets erased, so msi-x won't
@@ -222,20 +237,21 @@ void _iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans, bool low_power)
 	 * interrupt
 	 */
 	iwl_enable_rfkill_int(trans);
-
-	/* re-take ownership to prevent other users from stealing the device */
-	iwl_pcie_prepare_card_hw(trans);
 }
 
-void iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans, bool low_power)
+void iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
 	bool was_in_rfkill;
 
+	iwl_op_mode_time_point(trans->op_mode,
+			       IWL_FW_INI_TIME_POINT_HOST_DEVICE_DISABLE,
+			       NULL);
+
 	mutex_lock(&trans_pcie->mutex);
 	trans_pcie->opmode_down = true;
 	was_in_rfkill = test_bit(STATUS_RFKILL_OPMODE, &trans->status);
-	_iwl_trans_pcie_gen2_stop_device(trans, low_power);
+	_iwl_trans_pcie_gen2_stop_device(trans);
 	iwl_trans_pcie_handle_stop_rfkill(trans, was_in_rfkill);
 	mutex_unlock(&trans_pcie->mutex);
 }
@@ -243,11 +259,16 @@ void iwl_trans_pcie_gen2_stop_device(struct iwl_trans *trans, bool low_power)
 static int iwl_pcie_gen2_nic_init(struct iwl_trans *trans)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+	int queue_size = max_t(u32, IWL_CMD_QUEUE_SIZE,
+			       trans->mac_cfg->base->min_txq_size);
+	int ret;
 
 	/* TODO: most of the logic can be removed in A0 - but not in Z0 */
-	spin_lock(&trans_pcie->irq_lock);
-	iwl_pcie_gen2_apm_init(trans);
-	spin_unlock(&trans_pcie->irq_lock);
+	spin_lock_bh(&trans_pcie->irq_lock);
+	ret = iwl_pcie_gen2_apm_init(trans);
+	spin_unlock_bh(&trans_pcie->irq_lock);
+	if (ret)
+		return ret;
 
 	iwl_op_mode_nic_config(trans->op_mode);
 
@@ -256,39 +277,242 @@ static int iwl_pcie_gen2_nic_init(struct iwl_trans *trans)
 		return -ENOMEM;
 
 	/* Allocate or reset and init all Tx and Command queues */
-	if (iwl_pcie_gen2_tx_init(trans))
+	if (iwl_txq_gen2_init(trans, trans->conf.cmd_queue, queue_size))
 		return -ENOMEM;
 
 	/* enable shadow regs in HW */
-	iwl_set_bit(trans, CSR_MAC_SHADOW_REG_CTRL, 0x800FFFFF);
+	iwl_trans_set_bit(trans, CSR_MAC_SHADOW_REG_CTRL, 0x800FFFFF);
 	IWL_DEBUG_INFO(trans, "Enabling shadow registers in device\n");
 
 	return 0;
 }
 
-void iwl_trans_pcie_gen2_fw_alive(struct iwl_trans *trans, u32 scd_addr)
+static void iwl_pcie_get_rf_name(struct iwl_trans *trans)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+	char *buf = trans_pcie->rf_name;
+	size_t buflen = sizeof(trans_pcie->rf_name);
+	size_t pos;
+	u32 version;
+
+	if (buf[0])
+		return;
+
+	switch (CSR_HW_RFID_TYPE(trans->info.hw_rf_id)) {
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_JF):
+		pos = scnprintf(buf, buflen, "JF");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_GF):
+		pos = scnprintf(buf, buflen, "GF");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_GF4):
+		pos = scnprintf(buf, buflen, "GF4");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_HR):
+		pos = scnprintf(buf, buflen, "HR");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_HR1):
+		pos = scnprintf(buf, buflen, "HR1");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_HRCDB):
+		pos = scnprintf(buf, buflen, "HRCDB");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_FM):
+		pos = scnprintf(buf, buflen, "FM");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_WP):
+		if (SILICON_Z_STEP ==
+		    CSR_HW_RFID_STEP(trans->info.hw_rf_id))
+			pos = scnprintf(buf, buflen, "WHTC");
+		else
+			pos = scnprintf(buf, buflen, "WH");
+		break;
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_PE):
+		if (SILICON_Z_STEP ==
+		    CSR_HW_RFID_STEP(trans->info.hw_rf_id))
+			pos = scnprintf(buf, buflen, "PETC");
+		else
+			pos = scnprintf(buf, buflen, "PE");
+		break;
+	default:
+		return;
+	}
+
+	switch (CSR_HW_RFID_TYPE(trans->info.hw_rf_id)) {
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_HR):
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_HR1):
+	case CSR_HW_RFID_TYPE(CSR_HW_RF_ID_TYPE_HRCDB):
+		version = iwl_trans_read_prph(trans, CNVI_MBOX_C);
+		switch (version) {
+		case 0x20000:
+			pos += scnprintf(buf + pos, buflen - pos, " B3");
+			break;
+		case 0x120000:
+			pos += scnprintf(buf + pos, buflen - pos, " B5");
+			break;
+		default:
+			pos += scnprintf(buf + pos, buflen - pos,
+					 " (0x%x)", version);
+			break;
+		}
+		break;
+	default:
+		break;
+	}
+
+	pos += scnprintf(buf + pos, buflen - pos, ", rfid=0x%x",
+			 trans->info.hw_rf_id);
+
+	IWL_INFO(trans, "Detected RF %s\n", buf);
+
+	/*
+	 * also add a \n for debugfs - need to do it after printing
+	 * since our IWL_INFO machinery wants to see a static \n at
+	 * the end of the string
+	 */
+	pos += scnprintf(buf + pos, buflen - pos, "\n");
+}
+
+void iwl_trans_pcie_gen2_fw_alive(struct iwl_trans *trans)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+	u32 step_reg;
 
 	iwl_pcie_reset_ict(trans);
 
 	/* make sure all queue are not stopped/used */
-	memset(trans_pcie->queue_stopped, 0, sizeof(trans_pcie->queue_stopped));
-	memset(trans_pcie->queue_used, 0, sizeof(trans_pcie->queue_used));
+	memset(trans_pcie->txqs.queue_stopped, 0,
+	       sizeof(trans_pcie->txqs.queue_stopped));
+	memset(trans_pcie->txqs.queue_used, 0,
+	       sizeof(trans_pcie->txqs.queue_used));
 
 	/* now that we got alive we can free the fw image & the context info.
 	 * paging memory cannot be freed included since FW will still use it
 	 */
-	iwl_pcie_ctxt_info_free(trans);
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_AX210)
+		iwl_pcie_ctxt_info_v2_free(trans, true);
+	else
+		iwl_pcie_ctxt_info_free(trans);
+
+	/*
+	 * Re-enable all the interrupts, including the RF-Kill one, now that
+	 * the firmware is alive.
+	 */
+	iwl_enable_interrupts(trans);
+	mutex_lock(&trans_pcie->mutex);
+	iwl_pcie_check_hw_rf_kill(trans);
+
+	iwl_pcie_get_rf_name(trans);
+	mutex_unlock(&trans_pcie->mutex);
+
+	if (trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_BZ)
+		return;
+
+	step_reg = trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_SC ?
+		   CNVI_PMU_STEP_FLOW_SC : CNVI_PMU_STEP_FLOW_BZ;
+	trans->step_urm = !!(iwl_trans_read_prph(trans, step_reg) &
+			     CNVI_PMU_STEP_FLOW_FORCE_URM);
+}
+
+static bool iwl_pcie_set_ltr(struct iwl_trans *trans)
+{
+	u32 ltr_val = CSR_LTR_LONG_VAL_AD_NO_SNOOP_REQ |
+		      u32_encode_bits(CSR_LTR_LONG_VAL_AD_SCALE_USEC,
+				      CSR_LTR_LONG_VAL_AD_NO_SNOOP_SCALE) |
+		      u32_encode_bits(250,
+				      CSR_LTR_LONG_VAL_AD_NO_SNOOP_VAL) |
+		      CSR_LTR_LONG_VAL_AD_SNOOP_REQ |
+		      u32_encode_bits(CSR_LTR_LONG_VAL_AD_SCALE_USEC,
+				      CSR_LTR_LONG_VAL_AD_SNOOP_SCALE) |
+		      u32_encode_bits(250, CSR_LTR_LONG_VAL_AD_SNOOP_VAL);
+
+	/*
+	 * To workaround hardware latency issues during the boot process,
+	 * initialize the LTR to ~250 usec (see ltr_val above).
+	 * The firmware initializes this again later (to a smaller value).
+	 */
+	if ((trans->mac_cfg->device_family == IWL_DEVICE_FAMILY_AX210 ||
+	     trans->mac_cfg->device_family == IWL_DEVICE_FAMILY_22000) &&
+	    !trans->mac_cfg->integrated) {
+		iwl_trans_pcie_write32(trans, CSR_LTR_LONG_VAL_AD, ltr_val);
+		return true;
+	}
+
+	if (trans->mac_cfg->integrated &&
+	    trans->mac_cfg->device_family == IWL_DEVICE_FAMILY_22000) {
+		iwl_trans_write_prph(trans, HPM_MAC_LTR_CSR, HPM_MAC_LRT_ENABLE_ALL);
+		iwl_trans_write_prph(trans, HPM_UMAC_LTR, ltr_val);
+		return true;
+	}
+
+	if (trans->mac_cfg->device_family == IWL_DEVICE_FAMILY_AX210) {
+		/* First clear the interrupt, just in case */
+		iwl_trans_pcie_write32(trans, CSR_MSIX_HW_INT_CAUSES_AD,
+				       MSIX_HW_INT_CAUSES_REG_IML);
+		/* In this case, unfortunately the same ROM bug exists in the
+		 * device (not setting LTR correctly), but we don't have control
+		 * over the settings from the host due to some hardware security
+		 * features. The only workaround we've been able to come up with
+		 * so far is to try to keep the CPU and device busy by polling
+		 * it and the IML (image loader) completed interrupt.
+		 */
+		return false;
+	}
+
+	/* nothing needs to be done on other devices */
+	return true;
+}
+
+static void iwl_pcie_spin_for_iml(struct iwl_trans *trans)
+{
+/* in practice, this seems to complete in around 20-30ms at most, wait 100 */
+#define IML_WAIT_TIMEOUT	(HZ / 10)
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+	unsigned long end_time = jiffies + IML_WAIT_TIMEOUT;
+	u32 value, loops = 0;
+	bool irq = false;
+
+	if (WARN_ON(!trans_pcie->iml))
+		return;
+
+	value = iwl_trans_pcie_read32(trans, CSR_LTR_LAST_MSG);
+	IWL_DEBUG_INFO(trans, "Polling for IML load - CSR_LTR_LAST_MSG=0x%x\n",
+		       value);
+
+	while (time_before(jiffies, end_time)) {
+		if (iwl_trans_pcie_read32(trans, CSR_MSIX_HW_INT_CAUSES_AD) &
+				MSIX_HW_INT_CAUSES_REG_IML) {
+			irq = true;
+			break;
+		}
+		/* Keep the CPU and device busy. */
+		value = iwl_trans_pcie_read32(trans, CSR_LTR_LAST_MSG);
+		loops++;
+	}
+
+	IWL_DEBUG_INFO(trans,
+		       "Polled for IML load: irq=%d, loops=%d, CSR_LTR_LAST_MSG=0x%x\n",
+		       irq, loops, value);
+
+	/* We don't fail here even if we timed out - maybe we get lucky and the
+	 * interrupt comes in later (and we get alive from firmware) and then
+	 * we're all happy - but if not we'll fail on alive timeout or get some
+	 * other error out.
+	 */
 }
 
 int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
-				 const struct fw_img *fw, bool run_in_rfkill)
+				 const struct iwl_fw *fw,
+				 const struct fw_img *img,
+				 bool run_in_rfkill)
 {
 	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
-	bool hw_rfkill;
+	bool hw_rfkill, keep_ram_busy;
+	bool top_reset_done = false;
 	int ret;
 
+	mutex_lock(&trans_pcie->mutex);
+again:
 	/* This may fail if AMT took ownership of the device */
 	if (iwl_pcie_prepare_card_hw(trans)) {
 		IWL_WARN(trans, "Exit HW not ready\n");
@@ -298,7 +522,7 @@ int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
 
 	iwl_enable_rfkill_int(trans);
 
-	iwl_write32(trans, CSR_INT, 0xFFFFFFFF);
+	iwl_trans_pcie_write32(trans, CSR_INT, 0xFFFFFFFF);
 
 	/*
 	 * We enabled the RF-Kill interrupt and the handler may very
@@ -309,8 +533,6 @@ int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
 
 	/* Make sure it finished running */
 	iwl_pcie_synchronize_irqs(trans);
-
-	mutex_lock(&trans_pcie->mutex);
 
 	/* If platform's RF_KILL switch is NOT set to KILL */
 	hw_rfkill = iwl_pcie_check_hw_rf_kill(trans);
@@ -328,12 +550,12 @@ int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
 	}
 
 	/* make sure rfkill handshake bits are cleared */
-	iwl_write32(trans, CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_SW_BIT_RFKILL);
-	iwl_write32(trans, CSR_UCODE_DRV_GP1_CLR,
-		    CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED);
+	iwl_trans_pcie_write32(trans, CSR_UCODE_DRV_GP1_CLR, CSR_UCODE_SW_BIT_RFKILL);
+	iwl_trans_pcie_write32(trans, CSR_UCODE_DRV_GP1_CLR,
+			       CSR_UCODE_DRV_GP1_BIT_CMD_BLOCKED);
 
 	/* clear (again), then enable host interrupts */
-	iwl_write32(trans, CSR_INT, 0xFFFFFFFF);
+	iwl_trans_pcie_write32(trans, CSR_INT, 0xFFFFFFFF);
 
 	ret = iwl_pcie_gen2_nic_init(trans);
 	if (ret) {
@@ -341,9 +563,83 @@ int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
 		goto out;
 	}
 
-	ret = iwl_pcie_ctxt_info_init(trans, fw);
-	if (ret)
+	if (WARN_ON(trans->do_top_reset &&
+		    trans->mac_cfg->device_family < IWL_DEVICE_FAMILY_SC)) {
+		ret = -EINVAL;
 		goto out;
+	}
+
+	/* we need to wait later - set state */
+	if (trans->do_top_reset)
+		trans_pcie->fw_reset_state = FW_RESET_TOP_REQUESTED;
+
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_AX210) {
+		if (!top_reset_done) {
+			ret = iwl_pcie_ctxt_info_v2_alloc(trans, fw, img);
+			if (ret)
+				goto out;
+		}
+
+		iwl_pcie_ctxt_info_v2_kick(trans);
+	} else {
+		ret = iwl_pcie_ctxt_info_init(trans, img);
+		if (ret)
+			goto out;
+	}
+
+	keep_ram_busy = !iwl_pcie_set_ltr(trans);
+
+	if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_BZ) {
+		IWL_DEBUG_POWER(trans, "function scratch register value is 0x%08x\n",
+				iwl_trans_pcie_read32(trans, CSR_FUNC_SCRATCH));
+		iwl_trans_pcie_write32(trans, CSR_FUNC_SCRATCH, CSR_FUNC_SCRATCH_INIT_VALUE);
+		iwl_trans_set_bit(trans, CSR_GP_CNTRL,
+				  CSR_GP_CNTRL_REG_FLAG_ROM_START);
+	} else if (trans->mac_cfg->device_family >= IWL_DEVICE_FAMILY_AX210) {
+		iwl_trans_write_umac_prph(trans, UREG_CPU_INIT_RUN, 1);
+	} else {
+		iwl_trans_write_prph(trans, UREG_CPU_INIT_RUN, 1);
+	}
+
+	if (keep_ram_busy)
+		iwl_pcie_spin_for_iml(trans);
+
+	if (trans->do_top_reset) {
+		trans->do_top_reset = 0;
+
+#define FW_TOP_RESET_TIMEOUT	(HZ / 4)
+		ret = wait_event_timeout(trans_pcie->fw_reset_waitq,
+					 trans_pcie->fw_reset_state != FW_RESET_TOP_REQUESTED,
+					 FW_TOP_RESET_TIMEOUT);
+
+		if (trans_pcie->fw_reset_state != FW_RESET_OK) {
+			if (trans_pcie->fw_reset_state != FW_RESET_TOP_REQUESTED)
+				IWL_ERR(trans,
+					"TOP reset interrupted by error (state %d)!\n",
+					trans_pcie->fw_reset_state);
+			else
+				IWL_ERR(trans, "TOP reset timed out!\n");
+			iwl_op_mode_nic_error(trans->op_mode,
+					      IWL_ERR_TYPE_TOP_RESET_FAILED);
+			iwl_trans_schedule_reset(trans,
+						 IWL_ERR_TYPE_TOP_RESET_FAILED);
+			ret = -EIO;
+			goto out;
+		}
+
+		msleep(10);
+		IWL_INFO(trans, "TOP reset successful, reinit now\n");
+		/* now load the firmware again properly */
+		ret = _iwl_trans_pcie_start_hw(trans);
+		if (ret) {
+			IWL_ERR(trans, "failed to start HW after TOP reset\n");
+			goto out;
+		}
+		trans_pcie->prph_scratch->ctrl_cfg.control.control_flags &=
+			~cpu_to_le32(IWL_PRPH_SCRATCH_TOP_RESET);
+		top_reset_done = true;
+		goto again;
+	}
 
 	/* re-check RF-Kill state since we may have missed the interrupt */
 	hw_rfkill = iwl_pcie_check_hw_rf_kill(trans);
@@ -353,4 +649,24 @@ int iwl_trans_pcie_gen2_start_fw(struct iwl_trans *trans,
 out:
 	mutex_unlock(&trans_pcie->mutex);
 	return ret;
+}
+
+void iwl_trans_pcie_gen2_op_mode_leave(struct iwl_trans *trans)
+{
+	struct iwl_trans_pcie *trans_pcie = IWL_TRANS_GET_PCIE_TRANS(trans);
+
+	mutex_lock(&trans_pcie->mutex);
+
+	/* disable interrupts - don't enable HW RF kill interrupt */
+	iwl_disable_interrupts(trans);
+
+	iwl_pcie_gen2_apm_stop(trans, true);
+
+	iwl_disable_interrupts(trans);
+
+	iwl_pcie_disable_ict(trans);
+
+	mutex_unlock(&trans_pcie->mutex);
+
+	iwl_pcie_synchronize_irqs(trans);
 }

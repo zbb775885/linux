@@ -254,7 +254,7 @@ struct octeon_oq_config {
 	u64 pkts_per_intr:16;
 
 	/** Interrupt Coalescing (Time Interval). Octeon will interrupt the
-	 *  host if atleast one packet was sent in the time interval specified
+	 *  host if at least one packet was sent in the time interval specified
 	 *  by this field. The driver uses time interval interrupt coalescing
 	 *  by default. The time is specified in microseconds.
 	 */
@@ -296,7 +296,7 @@ struct octeon_oq_config {
 	u64 oq_intr_pkt:16;
 
 	/** Interrupt Coalescing (Time Interval). Octeon will interrupt the
-	 *  host if atleast one packet was sent in the time interval specified
+	 *  host if at least one packet was sent in the time interval specified
 	 *  by this field. The driver uses time interval interrupt coalescing
 	 *  by default.  The time is specified in microseconds.
 	 */
@@ -438,9 +438,10 @@ struct octeon_config {
 #define  MAX_BAR1_IOREMAP_SIZE  (16 * OCTEON_BAR1_ENTRY_SIZE)
 
 /* Response lists - 1 ordered, 1 unordered-blocking, 1 unordered-nonblocking
+ *                  1 process done list, 1 zombie lists(timeouted sc list)
  * NoResponse Lists are now maintained with each IQ. (Dec' 2007).
  */
-#define MAX_RESPONSE_LISTS           4
+#define MAX_RESPONSE_LISTS           6
 
 /* Opcode hash bits. The opcode is hashed on the lower 6-bits to lookup the
  * dispatch table.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Simple test of virtio code, entirely in userpsace. */
+/* Simple test of virtio code, entirely in userspace. */
 #define _GNU_SOURCE
 #include <sched.h>
 #include <err.h>
@@ -139,7 +139,7 @@ static int parallel_test(u64 features,
 			 bool fast_vringh)
 {
 	void *host_map, *guest_map;
-	int fd, mapsize, to_guest[2], to_host[2];
+	int pipe_ret, fd, mapsize, to_guest[2], to_host[2];
 	unsigned long xfers = 0, notifies = 0, receives = 0;
 	unsigned int first_cpu, last_cpu;
 	cpu_set_t cpu_set;
@@ -159,10 +159,18 @@ static int parallel_test(u64 features,
 
 	/* Parent and child use separate addresses, to check our mapping logic! */
 	host_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-	guest_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+	if (host_map == MAP_FAILED)
+		err(1, "mmap host_map");
 
-	pipe(to_guest);
-	pipe(to_host);
+	guest_map = mmap(NULL, mapsize, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+	if (guest_map == MAP_FAILED)
+		err(1, "mmap guest_map");
+
+	pipe_ret = pipe(to_guest);
+	assert(!pipe_ret);
+
+	pipe_ret = pipe(to_host);
+	assert(!pipe_ret);
 
 	CPU_ZERO(&cpu_set);
 	find_cpus(&first_cpu, &last_cpu);
@@ -307,6 +315,8 @@ static int parallel_test(u64 features,
 		close(to_host[0]);
 
 		gvdev.vdev.features = features;
+		INIT_LIST_HEAD(&gvdev.vdev.vqs);
+		spin_lock_init(&gvdev.vdev.vqs_list_lock);
 		gvdev.to_host_fd = to_host[1];
 		gvdev.notifies = 0;
 
@@ -448,11 +458,15 @@ int main(int argc, char *argv[])
 	int err;
 	unsigned i;
 	void *ret;
+	struct vring_desc *ind;
+	char *data;
 	bool (*getrange)(struct vringh *vrh, u64 addr, struct vringh_range *r);
 	bool fast_vringh = false, parallel = false;
 
 	getrange = getrange_iov;
 	vdev.features = 0;
+	INIT_LIST_HEAD(&vdev.vqs);
+	spin_lock_init(&vdev.vqs_list_lock);
 
 	while (argv[1]) {
 		if (strcmp(argv[1], "--indirect") == 0)
@@ -512,7 +526,7 @@ int main(int argc, char *argv[])
 		errx(1, "virtqueue_add_sgs: %i", err);
 	__kmalloc_fake = NULL;
 
-	/* Host retreives it. */
+	/* Host retrieves it. */
 	vringh_iov_init(&riov, host_riov, ARRAY_SIZE(host_riov));
 	vringh_iov_init(&wiov, host_wiov, ARRAY_SIZE(host_wiov));
 
@@ -742,6 +756,45 @@ int main(int argc, char *argv[])
 			assert(buf[i] == i);
 		vringh_iov_cleanup(&riov);
 	}
+
+	/*
+	 * Regression test: a top-level indirect descriptor whose NEXT
+	 * points back to itself must be rejected with -ELOOP instead of
+	 * looping forever. Use index 1 rather than 0 so that returning
+	 * from the indirect table re-enters the same top-level descriptor.
+	 */
+	ind = __user_addr_max - USER_MEM/2;
+	data = __user_addr_max - USER_MEM/4;
+
+	/* Fresh ring and host state; resets last_avail_idx to 0. */
+	vring_init(&vrh.vring, RINGSIZE, __user_addr_min, ALIGN);
+	vringh_init_user(&vrh, vdev.features, RINGSIZE, true,
+			 vrh.vring.desc, vrh.vring.avail, vrh.vring.used);
+
+	/* Single-entry indirect table pointing at valid data. */
+	ind[0].addr = (unsigned long)data;
+	ind[0].len = 1;
+	ind[0].flags = 0;
+
+	/* Top-level desc[1]: INDIRECT, and NEXT loops back to itself. */
+	vrh.vring.desc[1].addr = (unsigned long)ind;
+	vrh.vring.desc[1].len = sizeof(*ind);
+	vrh.vring.desc[1].flags = VRING_DESC_F_INDIRECT | VRING_DESC_F_NEXT;
+	vrh.vring.desc[1].next = 1;
+
+	/* Publish head 1 on the avail ring. */
+	vrh.vring.avail->ring[0] = 1;
+	vrh.vring.avail->idx = 1;
+
+	vringh_iov_init(&riov, host_riov, ARRAY_SIZE(host_riov));
+	vringh_iov_init(&wiov, host_wiov, ARRAY_SIZE(host_wiov));
+
+	err = vringh_getdesc_user(&vrh, &riov, &wiov, getrange, &head);
+	if (err != -ELOOP)
+		errx(1, "self-referential indirect: %i not -ELOOP", err);
+
+	vringh_iov_cleanup(&riov);
+	vringh_iov_cleanup(&wiov);
 
 	/* Don't leak memory... */
 	vring_del_virtqueue(vq);

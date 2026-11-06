@@ -1,14 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mm/percpu-vm.c - vmalloc area based chunk allocation
  *
  * Copyright (C) 2010		SUSE Linux Products GmbH
  * Copyright (C) 2010		Tejun Heo <tj@kernel.org>
  *
- * This file is released under the GPLv2.
- *
  * Chunks are mapped into vmalloc areas and populated page by page.
  * This is the default chunk allocator.
  */
+#include "internal.h"
+#include "vmalloc.h"
 
 static struct page *pcpu_chunk_page(struct pcpu_chunk *chunk,
 				    unsigned int cpu, int page_idx)
@@ -21,6 +22,8 @@ static struct page *pcpu_chunk_page(struct pcpu_chunk *chunk,
 
 /**
  * pcpu_get_pages - get temp pages array
+ * @gfp: allocation flags passed to the underlying allocator, 0 to only
+ *	 return the cached array
  *
  * Returns pointer to array of pointers to struct page which can be indexed
  * with pcpu_page_idx().  Note that there is only one array and accesses
@@ -29,16 +32,21 @@ static struct page *pcpu_chunk_page(struct pcpu_chunk *chunk,
  * RETURNS:
  * Pointer to temp pages array on success.
  */
-static struct page **pcpu_get_pages(void)
+static struct page **pcpu_get_pages(gfp_t gfp)
 {
 	static struct page **pages;
 	size_t pages_size = pcpu_nr_units * pcpu_unit_pages * sizeof(pages[0]);
 
 	lockdep_assert_held(&pcpu_alloc_mutex);
 
-	if (!pages)
-		pages = pcpu_mem_zalloc(pages_size, GFP_KERNEL);
+	if (!pages && gfp)
+		pages = pcpu_mem_zalloc(pages_size, gfp);
 	return pages;
+}
+
+static struct page **pcpu_get_pages_cached(void)
+{
+	return pcpu_get_pages(0);
 }
 
 /**
@@ -134,7 +142,7 @@ static void pcpu_pre_unmap_flush(struct pcpu_chunk *chunk,
 
 static void __pcpu_unmap_pages(unsigned long addr, int nr_pages)
 {
-	unmap_kernel_range_noflush(addr, nr_pages << PAGE_SHIFT);
+	vunmap_range_noflush(addr, addr + (nr_pages << PAGE_SHIFT));
 }
 
 /**
@@ -191,10 +199,22 @@ static void pcpu_post_unmap_tlb_flush(struct pcpu_chunk *chunk,
 }
 
 static int __pcpu_map_pages(unsigned long addr, struct page **pages,
-			    int nr_pages)
+			    int nr_pages, gfp_t gfp)
 {
-	return map_kernel_range_noflush(addr, nr_pages << PAGE_SHIFT,
-					PAGE_KERNEL, pages);
+	unsigned int flags;
+	int ret;
+
+	/*
+	 * The vmalloc page table allocation path does not pass @gfp down
+	 * explicitly.  Apply the corresponding memalloc scope so implicit
+	 * page table allocations preserve NOFS/NOIO constraints.
+	 */
+	flags = memalloc_apply_gfp_scope(gfp);
+	ret = vmap_pages_range_noflush(addr, addr + (nr_pages << PAGE_SHIFT),
+				       PAGE_KERNEL, pages, PAGE_SHIFT, gfp);
+	memalloc_restore_scope(flags);
+
+	return ret;
 }
 
 /**
@@ -203,6 +223,7 @@ static int __pcpu_map_pages(unsigned long addr, struct page **pages,
  * @pages: pages array containing pages to be mapped
  * @page_start: page index of the first page to map
  * @page_end: page index of the last page to map + 1
+ * @gfp: allocation flags passed to the underlying allocator
  *
  * For each cpu, map pages [@page_start,@page_end) into @chunk.  The
  * caller is responsible for calling pcpu_post_map_flush() after all
@@ -211,8 +232,8 @@ static int __pcpu_map_pages(unsigned long addr, struct page **pages,
  * This function is responsible for setting up whatever is necessary for
  * reverse lookup (addr -> chunk).
  */
-static int pcpu_map_pages(struct pcpu_chunk *chunk,
-			  struct page **pages, int page_start, int page_end)
+static int pcpu_map_pages(struct pcpu_chunk *chunk, struct page **pages,
+			  int page_start, int page_end, gfp_t gfp)
 {
 	unsigned int cpu, tcpu;
 	int i, err;
@@ -220,7 +241,7 @@ static int pcpu_map_pages(struct pcpu_chunk *chunk,
 	for_each_possible_cpu(cpu) {
 		err = __pcpu_map_pages(pcpu_chunk_addr(chunk, cpu, page_start),
 				       &pages[pcpu_page_idx(cpu, page_start)],
-				       page_end - page_start);
+				       page_end - page_start, gfp);
 		if (err < 0)
 			goto err;
 
@@ -231,10 +252,10 @@ static int pcpu_map_pages(struct pcpu_chunk *chunk,
 	return 0;
 err:
 	for_each_possible_cpu(tcpu) {
-		if (tcpu == cpu)
-			break;
 		__pcpu_unmap_pages(pcpu_chunk_addr(chunk, tcpu, page_start),
 				   page_end - page_start);
+		if (tcpu == cpu)
+			break;
 	}
 	pcpu_post_unmap_tlb_flush(chunk, page_start, page_end);
 	return err;
@@ -271,21 +292,21 @@ static void pcpu_post_map_flush(struct pcpu_chunk *chunk,
  * @chunk.
  *
  * CONTEXT:
- * pcpu_alloc_mutex, does GFP_KERNEL allocation.
+ * pcpu_alloc_mutex, does @gfp allocation.
  */
 static int pcpu_populate_chunk(struct pcpu_chunk *chunk,
 			       int page_start, int page_end, gfp_t gfp)
 {
 	struct page **pages;
 
-	pages = pcpu_get_pages();
+	pages = pcpu_get_pages(gfp);
 	if (!pages)
 		return -ENOMEM;
 
 	if (pcpu_alloc_pages(chunk, pages, page_start, page_end, gfp))
 		return -ENOMEM;
 
-	if (pcpu_map_pages(chunk, pages, page_start, page_end)) {
+	if (pcpu_map_pages(chunk, pages, page_start, page_end, gfp)) {
 		pcpu_free_pages(chunk, pages, page_start, page_end);
 		return -ENOMEM;
 	}
@@ -303,6 +324,9 @@ static int pcpu_populate_chunk(struct pcpu_chunk *chunk,
  * For each cpu, depopulate and unmap pages [@page_start,@page_end)
  * from @chunk.
  *
+ * Caller is required to call pcpu_post_unmap_tlb_flush() if not returning the
+ * region back to vmalloc() which will lazily flush the tlb.
+ *
  * CONTEXT:
  * pcpu_alloc_mutex.
  */
@@ -316,15 +340,13 @@ static void pcpu_depopulate_chunk(struct pcpu_chunk *chunk,
 	 * successful population attempt so the temp pages array must
 	 * be available now.
 	 */
-	pages = pcpu_get_pages();
+	pages = pcpu_get_pages_cached();
 	BUG_ON(!pages);
 
 	/* unmap and free */
 	pcpu_pre_unmap_flush(chunk, page_start, page_end);
 
 	pcpu_unmap_pages(chunk, pages, page_start, page_end);
-
-	/* no need to flush tlb, vmalloc will handle it lazily */
 
 	pcpu_free_pages(chunk, pages, page_start, page_end);
 }
@@ -339,7 +361,7 @@ static struct pcpu_chunk *pcpu_create_chunk(gfp_t gfp)
 		return NULL;
 
 	vms = pcpu_get_vm_areas(pcpu_group_offsets, pcpu_group_sizes,
-				pcpu_nr_groups, pcpu_atom_size);
+				pcpu_nr_groups, pcpu_atom_size, gfp);
 	if (!vms) {
 		pcpu_free_chunk(chunk);
 		return NULL;
@@ -376,4 +398,34 @@ static int __init pcpu_verify_alloc_info(const struct pcpu_alloc_info *ai)
 {
 	/* no extra restriction */
 	return 0;
+}
+
+/**
+ * pcpu_should_reclaim_chunk - determine if a chunk should go into reclaim
+ * @chunk: chunk of interest
+ *
+ * This is the entry point for percpu reclaim.  If a chunk qualifies, it is then
+ * isolated and managed in separate lists at the back of pcpu_slot: sidelined
+ * and to_depopulate respectively.  The to_depopulate list holds chunks slated
+ * for depopulation.  They no longer contribute to pcpu_nr_empty_pop_pages once
+ * they are on this list.  Once depopulated, they are moved onto the sidelined
+ * list which enables them to be pulled back in for allocation if no other chunk
+ * can suffice the allocation.
+ */
+static bool pcpu_should_reclaim_chunk(struct pcpu_chunk *chunk)
+{
+	/* do not reclaim either the first chunk or reserved chunk */
+	if (chunk == pcpu_first_chunk || chunk == pcpu_reserved_chunk)
+		return false;
+
+	/*
+	 * If it is isolated, it may be on the sidelined list so move it back to
+	 * the to_depopulate list.  If we hit at least 1/4 pages empty pages AND
+	 * there is no system-wide shortage of empty pages aside from this
+	 * chunk, move it to the to_depopulate list.
+	 */
+	return ((chunk->isolated && chunk->nr_empty_pop_pages) ||
+		(pcpu_nr_empty_pop_pages >
+		 (PCPU_EMPTY_POP_PAGES_HIGH + chunk->nr_empty_pop_pages) &&
+		 chunk->nr_empty_pop_pages >= chunk->nr_pages / 4));
 }

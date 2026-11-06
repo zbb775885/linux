@@ -60,7 +60,7 @@ typedef struct _OVRL_SRC_DEST {
 	u32 ulDstX2;
 	u32 ulDstY2;
 
-	/*clipped pixel pos of source data within buffer thses need to be 128 bit word aligned */
+	/* clipped pixel pos of source data within buffer these need to be 128 bit word aligned */
 	u32 ulSrcX1;
 	u32 ulSrcY1;
 	u32 ulSrcX2;
@@ -331,7 +331,7 @@ int SetOverlayViewPort(volatile STG4000REG __iomem *pSTGReg,
 	u32 ulScale;
 	u32 ulLeft, ulRight;
 	u32 ulSrcLeft, ulSrcRight;
-	u32 ulScaleLeft, ulScaleRight;
+	u32 ulScaleLeft;
 	u32 ulhDecim;
 	u32 ulsVal;
 	u32 ulVertDecFactor;
@@ -470,7 +470,6 @@ int SetOverlayViewPort(volatile STG4000REG __iomem *pSTGReg,
 		 * round down the pixel pos to the nearest 8 pixels.
 		 */
 		ulScaleLeft = ulSrcLeft;
-		ulScaleRight = ulSrcRight;
 
 		/* shift fxscale until it is in the range of the scaler */
 		ulhDecim = 0;

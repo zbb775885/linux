@@ -1,4 +1,4 @@
-/**
+/*
  * MAX8925 ONKEY driver
  *
  * Copyright (C) 2009 Marvell International Ltd.
@@ -71,16 +71,12 @@ static int max8925_onkey_probe(struct platform_device *pdev)
 	int irq[2], error;
 
 	irq[0] = platform_get_irq(pdev, 0);
-	if (irq[0] < 0) {
-		dev_err(&pdev->dev, "No IRQ resource!\n");
+	if (irq[0] < 0)
 		return -EINVAL;
-	}
 
 	irq[1] = platform_get_irq(pdev, 1);
-	if (irq[1] < 0) {
-		dev_err(&pdev->dev, "No IRQ resource!\n");
+	if (irq[1] < 0)
 		return -EINVAL;
-	}
 
 	info = devm_kzalloc(&pdev->dev, sizeof(struct max8925_onkey_info),
 			    GFP_KERNEL);
@@ -100,7 +96,6 @@ static int max8925_onkey_probe(struct platform_device *pdev)
 	input->name = "max8925_on";
 	input->phys = "max8925_on/input0";
 	input->id.bustype = BUS_I2C;
-	input->dev.parent = &pdev->dev;
 	input_set_capability(input, EV_KEY, KEY_POWER);
 
 	error = devm_request_threaded_irq(&pdev->dev, irq[0], NULL,
@@ -133,7 +128,7 @@ static int max8925_onkey_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __maybe_unused max8925_onkey_suspend(struct device *dev)
+static int max8925_onkey_suspend(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct max8925_onkey_info *info = platform_get_drvdata(pdev);
@@ -147,7 +142,7 @@ static int __maybe_unused max8925_onkey_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused max8925_onkey_resume(struct device *dev)
+static int max8925_onkey_resume(struct device *dev)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	struct max8925_onkey_info *info = platform_get_drvdata(pdev);
@@ -161,12 +156,13 @@ static int __maybe_unused max8925_onkey_resume(struct device *dev)
 	return 0;
 }
 
-static SIMPLE_DEV_PM_OPS(max8925_onkey_pm_ops, max8925_onkey_suspend, max8925_onkey_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(max8925_onkey_pm_ops,
+				max8925_onkey_suspend, max8925_onkey_resume);
 
 static struct platform_driver max8925_onkey_driver = {
 	.driver		= {
 		.name	= "max8925-onkey",
-		.pm	= &max8925_onkey_pm_ops,
+		.pm	= pm_sleep_ptr(&max8925_onkey_pm_ops),
 	},
 	.probe		= max8925_onkey_probe,
 };

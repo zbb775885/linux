@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * klist.c - Routines for manipulating klists.
  *
  * Copyright (C) 2005 Patrick Mochel
- *
- * This file is released under the GPL v2.
  *
  * This klist interface provides a couple of structures that wrap around
  * struct list_head to provide explicit list "head" (struct klist) and list
@@ -37,6 +36,7 @@
 #include <linux/klist.h>
 #include <linux/export.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 
 /*
  * Use the lowest bit of n_klist to mark deleted nodes and exclude
@@ -188,18 +188,24 @@ static void klist_release(struct kref *kref)
 
 	WARN_ON(!knode_dead(n));
 	list_del(&n->n_node);
+	knode_set_klist(n, NULL);
 	spin_lock(&klist_remove_lock);
 	list_for_each_entry_safe(waiter, tmp, &klist_remove_waiters, list) {
+		struct task_struct *p;
+
 		if (waiter->node != n)
 			continue;
 
+		p = waiter->process;
+		get_task_struct(p);
 		list_del(&waiter->list);
-		waiter->woken = 1;
+		/* Publish only after the final waiter and n accesses */
+		smp_store_release(&waiter->woken, 1);
 		mb();
-		wake_up_process(waiter->process);
+		wake_up_process(p);
+		put_task_struct(p);
 	}
 	spin_unlock(&klist_remove_lock);
-	knode_set_klist(n, NULL);
 }
 
 static int klist_dec_and_del(struct klist_node *n)
@@ -251,7 +257,8 @@ void klist_remove(struct klist_node *n)
 
 	for (;;) {
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (waiter.woken)
+		/* Pairs with the release store in klist_release() */
+		if (smp_load_acquire(&waiter.woken))
 			break;
 		schedule();
 	}
@@ -336,8 +343,9 @@ struct klist_node *klist_prev(struct klist_iter *i)
 	void (*put)(struct klist_node *) = i->i_klist->put;
 	struct klist_node *last = i->i_cur;
 	struct klist_node *prev;
+	unsigned long flags;
 
-	spin_lock(&i->i_klist->k_lock);
+	spin_lock_irqsave(&i->i_klist->k_lock, flags);
 
 	if (last) {
 		prev = to_klist_node(last->n_node.prev);
@@ -356,7 +364,7 @@ struct klist_node *klist_prev(struct klist_iter *i)
 		prev = to_klist_node(prev->n_node.prev);
 	}
 
-	spin_unlock(&i->i_klist->k_lock);
+	spin_unlock_irqrestore(&i->i_klist->k_lock, flags);
 
 	if (put && last)
 		put(last);
@@ -377,8 +385,9 @@ struct klist_node *klist_next(struct klist_iter *i)
 	void (*put)(struct klist_node *) = i->i_klist->put;
 	struct klist_node *last = i->i_cur;
 	struct klist_node *next;
+	unsigned long flags;
 
-	spin_lock(&i->i_klist->k_lock);
+	spin_lock_irqsave(&i->i_klist->k_lock, flags);
 
 	if (last) {
 		next = to_klist_node(last->n_node.next);
@@ -397,7 +406,7 @@ struct klist_node *klist_next(struct klist_iter *i)
 		next = to_klist_node(next->n_node.next);
 	}
 
-	spin_unlock(&i->i_klist->k_lock);
+	spin_unlock_irqrestore(&i->i_klist->k_lock, flags);
 
 	if (put && last)
 		put(last);

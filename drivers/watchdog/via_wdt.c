@@ -1,8 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VIA Chipset Watchdog Driver
  *
  * Copyright (C) 2011 Sigfox
- * License terms: GNU General Public License (GPL) version 2
  * Author: Marc Vertes <marc.vertes@sigfox.com>
  * Based on a preliminary version from Harald Welte <HaraldWelte@viatech.com>
  * Timer code by Wim Van Sebroeck <wim@iguana.be>
@@ -18,6 +18,7 @@
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/stringify.h>
 #include <linux/timer.h>
 #include <linux/watchdog.h>
 
@@ -30,7 +31,7 @@
 #define VIA_WDT_CONF_MMIO	0x02	/* 1: enable watchdog MMIO */
 
 /*
- * The MMIO region contains the watchog control register and the
+ * The MMIO region contains the watchdog control register and the
  * hardware timer counter.
  */
 #define VIA_WDT_MMIO_LEN	8	/* MMIO region length in bytes */
@@ -56,12 +57,12 @@
 static int timeout = WDT_TIMEOUT;
 module_param(timeout, int, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds, between 1 and 1023 "
-	"(default = " __MODULE_STRING(WDT_TIMEOUT) ")");
+	"(default = " __stringify(WDT_TIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started "
-	"(default = " __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	"(default = " __stringify(WATCHDOG_NOWAYOUT) ")");
 
 static struct watchdog_device wdt_dev;
 static struct resource wdt_res;
@@ -82,7 +83,7 @@ static inline void wdt_reset(void)
 /*
  * Timer tick: the timer will make sure that the watchdog timer hardware
  * is being reset in time. The conditions to do this are:
- *  1) the watchog timer has been started and /dev/watchdog is open
+ *  1) the watchdog timer has been started and /dev/watchdog is open
  *     and there is still time left before userspace should send the
  *     next heartbeat/ping. (note: the internal heartbeat is much smaller
  *     then the external/userspace heartbeat).
@@ -165,6 +166,7 @@ static int wdt_probe(struct pci_dev *pdev,
 		dev_err(&pdev->dev, "cannot enable PCI device\n");
 		return -ENODEV;
 	}
+	wdt_res.name = "via_wdt";
 
 	/*
 	 * Allocate a MMIO region which contains watchdog control register
@@ -233,7 +235,7 @@ err_out_disable_device:
 static void wdt_remove(struct pci_dev *pdev)
 {
 	watchdog_unregister_device(&wdt_dev);
-	del_timer_sync(&timer);
+	timer_delete_sync(&timer);
 	iounmap(wdt_mem);
 	release_mem_region(mmio, VIA_WDT_MMIO_LEN);
 	release_resource(&wdt_res);
@@ -246,6 +248,7 @@ static const struct pci_device_id wdt_pci_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VX855) },
 	{ 0 }
 };
+MODULE_DEVICE_TABLE(pci, wdt_pci_table);
 
 static struct pci_driver wdt_driver = {
 	.name		= "via_wdt",

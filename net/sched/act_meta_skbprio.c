@@ -1,13 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/act_meta_prio.c IFE skb->priority metadata module
  *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
  * copyright Jamal Hadi Salim (2015)
- *
 */
 
 #include <linux/types.h>
@@ -15,6 +10,7 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/skbuff.h>
+#include <linux/unaligned.h>
 #include <linux/rtnetlink.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -38,9 +34,10 @@ static int skbprio_encode(struct sk_buff *skb, void *skbdata,
 
 static int skbprio_decode(struct sk_buff *skb, void *data, u16 len)
 {
-	u32 ifeprio = *(u32 *)data;
+	if (len != sizeof(u32))
+		return -EINVAL;
 
-	skb->priority = ntohl(ifeprio);
+	skb->priority = get_unaligned_be32(data);
 	return 0;
 }
 

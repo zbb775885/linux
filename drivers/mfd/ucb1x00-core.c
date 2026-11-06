@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/drivers/mfd/ucb1x00-core.c
  *
  *  Copyright (C) 2001 Russell King, All Rights Reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License.
  *
  *  The UCB1x00 core driver provides basic services for handling IO,
  *  the ADC, interrupts, and accessing registers.  It is designed
@@ -28,6 +25,7 @@
 #include <linux/mutex.h>
 #include <linux/mfd/ucb1x00.h>
 #include <linux/pm.h>
+#include <linux/property.h>
 #include <linux/gpio/driver.h>
 
 static DEFINE_MUTEX(ucb1x00_mutex);
@@ -107,7 +105,8 @@ unsigned int ucb1x00_io_read(struct ucb1x00 *ucb)
 	return ucb1x00_reg_read(ucb, UCB_IO_DATA);
 }
 
-static void ucb1x00_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
+static int ucb1x00_gpio_set(struct gpio_chip *chip, unsigned int offset,
+			    int value)
 {
 	struct ucb1x00 *ucb = gpiochip_get_data(chip);
 	unsigned long flags;
@@ -122,6 +121,8 @@ static void ucb1x00_gpio_set(struct gpio_chip *chip, unsigned offset, int value)
 	ucb1x00_reg_write(ucb, UCB_IO_DATA, ucb->io_out);
 	ucb1x00_disable(ucb);
 	spin_unlock_irqrestore(&ucb->io_lock, flags);
+
+	return 0;
 }
 
 static int ucb1x00_gpio_get(struct gpio_chip *chip, unsigned offset)
@@ -395,7 +396,7 @@ static int ucb1x00_add_dev(struct ucb1x00 *ucb, struct ucb1x00_driver *drv)
 	struct ucb1x00_dev *dev;
 	int ret;
 
-	dev = kmalloc(sizeof(struct ucb1x00_dev), GFP_KERNEL);
+	dev = kmalloc_obj(struct ucb1x00_dev);
 	if (!dev)
 		return -ENOMEM;
 
@@ -492,6 +493,11 @@ static struct class ucb1x00_class = {
 	.dev_release	= ucb1x00_release,
 };
 
+const struct software_node ucb1x00_gpiochip_node = {
+	.name = "ucb1x00-gpio",
+};
+EXPORT_SYMBOL_GPL(ucb1x00_gpiochip_node);
+
 static int ucb1x00_probe(struct mcp *mcp)
 {
 	struct ucb1x00_plat_data *pdata = mcp->attached_device.platform_data;
@@ -513,7 +519,7 @@ static int ucb1x00_probe(struct mcp *mcp)
 		goto out;
 	}
 
-	ucb = kzalloc(sizeof(struct ucb1x00), GFP_KERNEL);
+	ucb = kzalloc_obj(struct ucb1x00);
 	ret = -ENOMEM;
 	if (!ucb)
 		goto out;
@@ -529,6 +535,10 @@ static int ucb1x00_probe(struct mcp *mcp)
 
 	ucb->id  = id;
 	ucb->mcp = mcp;
+
+	ret = device_add_software_node(&ucb->dev, &ucb1x00_gpiochip_node);
+	if (ret)
+		goto err_swnode_add;
 
 	ret = device_add(&ucb->dev);
 	if (ret)
@@ -604,6 +614,8 @@ static int ucb1x00_probe(struct mcp *mcp)
  err_no_irq:
 	device_del(&ucb->dev);
  err_dev_add:
+	device_remove_software_node(&ucb->dev);
+ err_swnode_add:
 	put_device(&ucb->dev);
  out:
 	if (pdata && pdata->reset)
@@ -630,7 +642,9 @@ static void ucb1x00_remove(struct mcp *mcp)
 
 	irq_set_chained_handler(ucb->irq, NULL);
 	irq_free_descs(ucb->irq_base, 16);
-	device_unregister(&ucb->dev);
+	device_del(&ucb->dev);
+	device_remove_software_node(&ucb->dev);
+	put_device(&ucb->dev);
 
 	if (pdata && pdata->reset)
 		pdata->reset(UCB_RST_REMOVE);
@@ -663,7 +677,6 @@ void ucb1x00_unregister_driver(struct ucb1x00_driver *drv)
 	mutex_unlock(&ucb1x00_mutex);
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int ucb1x00_suspend(struct device *dev)
 {
 	struct ucb1x00_plat_data *pdata = dev_get_platdata(dev);
@@ -731,15 +744,15 @@ static int ucb1x00_resume(struct device *dev)
 	mutex_unlock(&ucb1x00_mutex);
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(ucb1x00_pm_ops, ucb1x00_suspend, ucb1x00_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(ucb1x00_pm_ops,
+				ucb1x00_suspend, ucb1x00_resume);
 
 static struct mcp_driver ucb1x00_driver = {
 	.drv		= {
 		.name	= "ucb1x00",
 		.owner	= THIS_MODULE,
-		.pm	= &ucb1x00_pm_ops,
+		.pm	= pm_sleep_ptr(&ucb1x00_pm_ops),
 	},
 	.probe		= ucb1x00_probe,
 	.remove		= ucb1x00_remove,

@@ -9,14 +9,15 @@
   _sdata = .;
   PROVIDE (sdata = .);
 
-  RODATA
+  RO_DATA(4096)
+
+  .lrodata : { *(.lrodata .lrodata.[0-9a-zA-Z_]* .lrodata..L*) }
 
   .unprotected : { *(.unprotected) }
   . = ALIGN(4096);
   PROVIDE (_unprotected_end = .);
 
   . = ALIGN(4096);
-  NOTES
   EXCEPTION_TABLE(0)
 
   BUG_TABLE
@@ -53,14 +54,6 @@
 	CON_INITCALL
   }
 
-  .uml.initcall.init : {
-	__uml_initcall_start = .;
-	*(.uml.initcall.init)
-	__uml_initcall_end = .;
-  }
-
-  SECURITY_INIT
-
   .exitcall : {
 	__exitcall_begin = .;
 	*(.exitcall.exit)
@@ -92,12 +85,15 @@
   }
   .init_array : {
 	__init_array_start = .;
+	*(.kasan_init)
+	*(.init_array.*)
 	*(.init_array)
 	__init_array_end = .;
   }
   .fini_array : {
 	__fini_array_start = .;
 	*(.fini_array)
+	*(.fini_array.*)
 	__fini_array_end = .;
   }
 

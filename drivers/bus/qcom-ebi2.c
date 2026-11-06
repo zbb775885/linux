@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Qualcomm External Bus Interface 2 (EBI2) driver
  * an older version of the Qualcomm Parallel Interface Controller (QPIC)
@@ -5,10 +6,6 @@
  * Copyright (C) 2016 Linaro Ltd.
  *
  * Author: Linus Walleij <linus.walleij@linaro.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2, as
- * published by the Free Software Foundation.
  *
  * See the device tree bindings for this block for more details on the
  * hardware.
@@ -21,7 +18,6 @@
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/init.h>
-#include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/bitops.h>
@@ -106,8 +102,8 @@
 /**
  * struct cs_data - struct with info on a chipselect setting
  * @enable_mask: mask to enable the chipselect in the EBI2 config
- * @slow_cfg0: offset to XMEMC slow CS config
- * @fast_cfg1: offset to XMEMC fast CS config
+ * @slow_cfg: offset to XMEMC slow CS config
+ * @fast_cfg: offset to XMEMC fast CS config
  */
 struct cs_data {
 	u32 enable_mask;
@@ -296,7 +292,6 @@ static void qcom_ebi2_setup_chipselect(struct device_node *np,
 static int qcom_ebi2_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
-	struct device_node *child;
 	struct device *dev = &pdev->dev;
 	struct resource *res;
 	void __iomem *ebi2_base;
@@ -307,41 +302,23 @@ static int qcom_ebi2_probe(struct platform_device *pdev)
 	u32 val;
 	int ret;
 
-	ebi2xclk = devm_clk_get(dev, "ebi2x");
+	ebi2xclk = devm_clk_get_enabled(dev, "ebi2x");
 	if (IS_ERR(ebi2xclk))
 		return PTR_ERR(ebi2xclk);
 
-	ret = clk_prepare_enable(ebi2xclk);
-	if (ret) {
-		dev_err(dev, "could not enable EBI2X clk (%d)\n", ret);
-		return ret;
-	}
-
-	ebi2clk = devm_clk_get(dev, "ebi2");
-	if (IS_ERR(ebi2clk)) {
-		ret = PTR_ERR(ebi2clk);
-		goto err_disable_2x_clk;
-	}
-
-	ret = clk_prepare_enable(ebi2clk);
-	if (ret) {
-		dev_err(dev, "could not enable EBI2 clk\n");
-		goto err_disable_2x_clk;
-	}
+	ebi2clk = devm_clk_get_enabled(dev, "ebi2");
+	if (IS_ERR(ebi2clk))
+		return PTR_ERR(ebi2clk);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	ebi2_base = devm_ioremap_resource(dev, res);
-	if (IS_ERR(ebi2_base)) {
-		ret = PTR_ERR(ebi2_base);
-		goto err_disable_clk;
-	}
+	if (IS_ERR(ebi2_base))
+		return PTR_ERR(ebi2_base);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	ebi2_xmem = devm_ioremap_resource(dev, res);
-	if (IS_ERR(ebi2_xmem)) {
-		ret = PTR_ERR(ebi2_xmem);
-		goto err_disable_clk;
-	}
+	if (IS_ERR(ebi2_xmem))
+		return PTR_ERR(ebi2_xmem);
 
 	/* Allegedly this turns the power save mode off */
 	writel(0UL, ebi2_xmem + EBI2_XMEM_CFG);
@@ -352,7 +329,7 @@ static int qcom_ebi2_probe(struct platform_device *pdev)
 	writel(val, ebi2_base);
 
 	/* Walk over the child nodes and see what chipselects we use */
-	for_each_available_child_of_node(np, child) {
+	for_each_available_child_of_node_scoped(np, child) {
 		u32 csindex;
 
 		/* Figure out the chipselect */
@@ -378,15 +355,9 @@ static int qcom_ebi2_probe(struct platform_device *pdev)
 	}
 
 	if (have_children)
-		return of_platform_default_populate(np, NULL, dev);
+		return devm_of_platform_populate(dev);
+
 	return 0;
-
-err_disable_clk:
-	clk_disable_unprepare(ebi2clk);
-err_disable_2x_clk:
-	clk_disable_unprepare(ebi2xclk);
-
-	return ret;
 }
 
 static const struct of_device_id qcom_ebi2_of_match[] = {
@@ -405,4 +376,3 @@ static struct platform_driver qcom_ebi2_driver = {
 module_platform_driver(qcom_ebi2_driver);
 MODULE_AUTHOR("Linus Walleij <linus.walleij@linaro.org>");
 MODULE_DESCRIPTION("Qualcomm EBI2 driver");
-MODULE_LICENSE("GPL");

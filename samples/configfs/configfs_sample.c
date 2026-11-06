@@ -1,38 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * vim: noexpandtab ts=8 sts=0 sw=8:
- *
  * configfs_example_macros.c - This file is a demonstration module
  *      containing a number of configfs subsystems.  It uses the helper
  *      macros defined by configfs.h
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
- *
  * Based on sysfs:
- * 	sysfs is Copyright (C) 2001, 2002, 2003 Patrick Mochel
+ *      sysfs is Copyright (C) 2001, 2002, 2003 Patrick Mochel
  *
  * configfs Copyright (C) 2005 Oracle.  All rights reserved.
  */
 
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-
 #include <linux/configfs.h>
-
-
 
 /*
  * 01-childless
@@ -54,8 +36,8 @@ struct childless {
 
 static inline struct childless *to_childless(struct config_item *item)
 {
-	return item ? container_of(to_configfs_subsystem(to_config_group(item)),
-			struct childless, subsys) : NULL;
+	return container_of(to_configfs_subsystem(to_config_group(item)),
+			    struct childless, subsys);
 }
 
 static ssize_t childless_showme_show(struct config_item *item, char *page)
@@ -78,17 +60,11 @@ static ssize_t childless_storeme_store(struct config_item *item,
 		const char *page, size_t count)
 {
 	struct childless *childless = to_childless(item);
-	unsigned long tmp;
-	char *p = (char *) page;
+	int ret;
 
-	tmp = simple_strtoul(p, &p, 10);
-	if (!p || (*p && (*p != '\n')))
-		return -EINVAL;
-
-	if (tmp > INT_MAX)
-		return -ERANGE;
-
-	childless->storeme = tmp;
+	ret = kstrtoint(page, 10, &childless->storeme);
+	if (ret)
+		return ret;
 
 	return count;
 }
@@ -108,7 +84,7 @@ CONFIGFS_ATTR_RO(childless_, showme);
 CONFIGFS_ATTR(childless_, storeme);
 CONFIGFS_ATTR_RO(childless_, description);
 
-static struct configfs_attribute *childless_attrs[] = {
+static const struct configfs_attribute *const childless_attrs[] = {
 	&childless_attr_showme,
 	&childless_attr_storeme,
 	&childless_attr_description,
@@ -116,7 +92,7 @@ static struct configfs_attribute *childless_attrs[] = {
 };
 
 static const struct config_item_type childless_type = {
-	.ct_attrs	= childless_attrs,
+	.ct_attrs_const	= childless_attrs,
 	.ct_owner	= THIS_MODULE,
 };
 
@@ -130,7 +106,6 @@ static struct childless childless_subsys = {
 		},
 	},
 };
-
 
 /* ----------------------------------------------------------------- */
 
@@ -150,7 +125,7 @@ struct simple_child {
 
 static inline struct simple_child *to_simple_child(struct config_item *item)
 {
-	return item ? container_of(item, struct simple_child, item) : NULL;
+	return container_of(item, struct simple_child, item);
 }
 
 static ssize_t simple_child_storeme_show(struct config_item *item, char *page)
@@ -162,24 +137,18 @@ static ssize_t simple_child_storeme_store(struct config_item *item,
 		const char *page, size_t count)
 {
 	struct simple_child *simple_child = to_simple_child(item);
-	unsigned long tmp;
-	char *p = (char *) page;
+	int ret;
 
-	tmp = simple_strtoul(p, &p, 10);
-	if (!p || (*p && (*p != '\n')))
-		return -EINVAL;
-
-	if (tmp > INT_MAX)
-		return -ERANGE;
-
-	simple_child->storeme = tmp;
+	ret = kstrtoint(page, 10, &simple_child->storeme);
+	if (ret)
+		return ret;
 
 	return count;
 }
 
 CONFIGFS_ATTR(simple_child_, storeme);
 
-static struct configfs_attribute *simple_child_attrs[] = {
+static const struct configfs_attribute *const simple_child_attrs[] = {
 	&simple_child_attr_storeme,
 	NULL,
 };
@@ -189,16 +158,15 @@ static void simple_child_release(struct config_item *item)
 	kfree(to_simple_child(item));
 }
 
-static struct configfs_item_operations simple_child_item_ops = {
-	.release		= simple_child_release,
+static const struct configfs_item_operations simple_child_item_ops = {
+	.release	= simple_child_release,
 };
 
 static const struct config_item_type simple_child_type = {
 	.ct_item_ops	= &simple_child_item_ops,
-	.ct_attrs	= simple_child_attrs,
+	.ct_attrs_const	= simple_child_attrs,
 	.ct_owner	= THIS_MODULE,
 };
-
 
 struct simple_children {
 	struct config_group group;
@@ -206,8 +174,8 @@ struct simple_children {
 
 static inline struct simple_children *to_simple_children(struct config_item *item)
 {
-	return item ? container_of(to_config_group(item),
-			struct simple_children, group) : NULL;
+	return container_of(to_config_group(item),
+			    struct simple_children, group);
 }
 
 static struct config_item *simple_children_make_item(struct config_group *group,
@@ -221,8 +189,6 @@ static struct config_item *simple_children_make_item(struct config_group *group,
 
 	config_item_init_type_name(&simple_child->item, name,
 				   &simple_child_type);
-
-	simple_child->storeme = 0;
 
 	return &simple_child->item;
 }
@@ -239,7 +205,7 @@ static ssize_t simple_children_description_show(struct config_item *item,
 
 CONFIGFS_ATTR_RO(simple_children_, description);
 
-static struct configfs_attribute *simple_children_attrs[] = {
+static const struct configfs_attribute *const simple_children_attrs[] = {
 	&simple_children_attr_description,
 	NULL,
 };
@@ -249,7 +215,7 @@ static void simple_children_release(struct config_item *item)
 	kfree(to_simple_children(item));
 }
 
-static struct configfs_item_operations simple_children_item_ops = {
+static const struct configfs_item_operations simple_children_item_ops = {
 	.release	= simple_children_release,
 };
 
@@ -257,14 +223,14 @@ static struct configfs_item_operations simple_children_item_ops = {
  * Note that, since no extra work is required on ->drop_item(),
  * no ->drop_item() is provided.
  */
-static struct configfs_group_operations simple_children_group_ops = {
+static const struct configfs_group_operations simple_children_group_ops = {
 	.make_item	= simple_children_make_item,
 };
 
 static const struct config_item_type simple_children_type = {
 	.ct_item_ops	= &simple_children_item_ops,
 	.ct_group_ops	= &simple_children_group_ops,
-	.ct_attrs	= simple_children_attrs,
+	.ct_attrs_const	= simple_children_attrs,
 	.ct_owner	= THIS_MODULE,
 };
 
@@ -276,7 +242,6 @@ static struct configfs_subsystem simple_children_subsys = {
 		},
 	},
 };
-
 
 /* ----------------------------------------------------------------- */
 
@@ -318,7 +283,7 @@ static ssize_t group_children_description_show(struct config_item *item,
 
 CONFIGFS_ATTR_RO(group_children_, description);
 
-static struct configfs_attribute *group_children_attrs[] = {
+static const struct configfs_attribute *const group_children_attrs[] = {
 	&group_children_attr_description,
 	NULL,
 };
@@ -327,13 +292,13 @@ static struct configfs_attribute *group_children_attrs[] = {
  * Note that, since no extra work is required on ->drop_item(),
  * no ->drop_item() is provided.
  */
-static struct configfs_group_operations group_children_group_ops = {
+static const struct configfs_group_operations group_children_group_ops = {
 	.make_group	= group_children_make_group,
 };
 
 static const struct config_item_type group_children_type = {
 	.ct_group_ops	= &group_children_group_ops,
-	.ct_attrs	= group_children_attrs,
+	.ct_attrs_const	= group_children_attrs,
 	.ct_owner	= THIS_MODULE,
 };
 
@@ -342,6 +307,126 @@ static struct configfs_subsystem group_children_subsys = {
 		.cg_item = {
 			.ci_namebuf = "03-group-children",
 			.ci_type = &group_children_type,
+		},
+	},
+};
+
+/* ----------------------------------------------------------------- */
+
+/*
+ * 04-symlink-children
+ *
+ * This example has children that are valid sources for symlink(2).  A
+ * child accepts a link to any other config_item and reports how many
+ * links it currently holds, so ->allow_link() and ->drop_link() are
+ * observable from userspace.
+ */
+
+struct symlink_child {
+	struct config_item item;
+	int nlinks;
+};
+
+static inline struct symlink_child *to_symlink_child(struct config_item *item)
+{
+	return container_of(item, struct symlink_child, item);
+}
+
+static ssize_t symlink_child_nlinks_show(struct config_item *item, char *page)
+{
+	return sprintf(page, "%d\n", to_symlink_child(item)->nlinks);
+}
+
+CONFIGFS_ATTR_RO(symlink_child_, nlinks);
+
+static struct configfs_attribute *symlink_child_attrs[] = {
+	&symlink_child_attr_nlinks,
+	NULL,
+};
+
+/*
+ * The VFS holds the source item's directory locked across symlink(2) and
+ * unlink(2), so ->nlinks needs no lock of its own.
+ */
+static int symlink_child_allow_link(struct config_item *src,
+		struct config_item *target)
+{
+	to_symlink_child(src)->nlinks++;
+
+	return 0;
+}
+
+static void symlink_child_drop_link(struct config_item *src,
+		struct config_item *target)
+{
+	to_symlink_child(src)->nlinks--;
+}
+
+static void symlink_child_release(struct config_item *item)
+{
+	kfree(to_symlink_child(item));
+}
+
+static const struct configfs_item_operations symlink_child_item_ops = {
+	.release	= symlink_child_release,
+	.allow_link	= symlink_child_allow_link,
+	.drop_link	= symlink_child_drop_link,
+};
+
+static const struct config_item_type symlink_child_type = {
+	.ct_item_ops	= &symlink_child_item_ops,
+	.ct_attrs	= symlink_child_attrs,
+	.ct_owner	= THIS_MODULE,
+};
+
+static struct config_item *symlink_children_make_item(
+		struct config_group *group, const char *name)
+{
+	struct symlink_child *symlink_child;
+
+	symlink_child = kzalloc_obj(*symlink_child, GFP_KERNEL);
+	if (!symlink_child)
+		return ERR_PTR(-ENOMEM);
+
+	config_item_init_type_name(&symlink_child->item, name,
+				   &symlink_child_type);
+
+	return &symlink_child->item;
+}
+
+static ssize_t symlink_children_description_show(struct config_item *item,
+		char *page)
+{
+	return sprintf(page,
+"[04-symlink-children]\n"
+"\n"
+"This subsystem allows the creation of child config_items that\n"
+"symlink(2) can point at other config_items from.  Each child\n"
+"reports the number of links it holds.\n");
+}
+
+CONFIGFS_ATTR_RO(symlink_children_, description);
+
+static struct configfs_attribute *symlink_children_attrs[] = {
+	&symlink_children_attr_description,
+	NULL,
+};
+
+static const struct configfs_group_operations symlink_children_group_ops = {
+	.make_item	= symlink_children_make_item,
+};
+
+static const struct config_item_type symlink_children_type = {
+	.ct_group_ops	= &symlink_children_group_ops,
+	.ct_attrs	= symlink_children_attrs,
+	.ct_owner	= THIS_MODULE,
+};
+
+static struct configfs_subsystem symlink_children_subsys = {
+	.su_group = {
+		.cg_item = {
+			.ci_namebuf = "04-symlink-children",
+			.ci_type = &symlink_children_type,
 		},
 	},
 };
@@ -359,14 +444,14 @@ static struct configfs_subsystem *example_subsys[] = {
 	&childless_subsys.subsys,
 	&simple_children_subsys,
 	&group_children_subsys,
+	&symlink_children_subsys,
 	NULL,
 };
 
 static int __init configfs_example_init(void)
 {
-	int ret;
-	int i;
 	struct configfs_subsystem *subsys;
+	int ret, i;
 
 	for (i = 0; example_subsys[i]; i++) {
 		subsys = example_subsys[i];
@@ -375,9 +460,8 @@ static int __init configfs_example_init(void)
 		mutex_init(&subsys->su_mutex);
 		ret = configfs_register_subsystem(subsys);
 		if (ret) {
-			printk(KERN_ERR "Error %d while registering subsystem %s\n",
-			       ret,
-			       subsys->su_group.cg_item.ci_namebuf);
+			pr_err("Error %d while registering subsystem %s\n",
+			       ret, subsys->su_group.cg_item.ci_namebuf);
 			goto out_unregister;
 		}
 	}
@@ -401,4 +485,5 @@ static void __exit configfs_example_exit(void)
 
 module_init(configfs_example_init);
 module_exit(configfs_example_exit);
+MODULE_DESCRIPTION("Sample configfs module");
 MODULE_LICENSE("GPL");

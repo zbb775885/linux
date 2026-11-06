@@ -1,17 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kontron PLD watchdog driver
  *
  * Copyright (c) 2010-2013 Kontron Europe GmbH
  * Author: Michael Brunner <michael.brunner@kontron.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License 2 as published
- * by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  *
  * Note: From the PLD watchdog point of view timeout and pretimeout are
  *       defined differently than in the kernel.
@@ -29,6 +21,7 @@
 #include <linux/uaccess.h>
 #include <linux/watchdog.h>
 #include <linux/platform_device.h>
+#include <linux/stringify.h>
 #include <linux/mfd/kempld.h>
 
 #define KEMPLD_WDT_STAGE_TIMEOUT(x)	(0x1b + (x) * 4)
@@ -83,9 +76,7 @@ struct kempld_wdt_data {
 	struct watchdog_device		wdd;
 	unsigned int			pretimeout;
 	struct kempld_wdt_stage		stage[KEMPLD_WDT_MAX_STAGES];
-#ifdef CONFIG_PM
 	u8				pm_status_store;
-#endif
 };
 
 #define DEFAULT_TIMEOUT		30 /* seconds */
@@ -95,19 +86,19 @@ static unsigned int timeout = DEFAULT_TIMEOUT;
 module_param(timeout, uint, 0);
 MODULE_PARM_DESC(timeout,
 	"Watchdog timeout in seconds. (>=0, default="
-	__MODULE_STRING(DEFAULT_TIMEOUT) ")");
+	__stringify(DEFAULT_TIMEOUT) ")");
 
 static unsigned int pretimeout = DEFAULT_PRETIMEOUT;
 module_param(pretimeout, uint, 0);
 MODULE_PARM_DESC(pretimeout,
 	"Watchdog pretimeout in seconds. (>=0, default="
-	__MODULE_STRING(DEFAULT_PRETIMEOUT) ")");
+	__stringify(DEFAULT_PRETIMEOUT) ")");
 
 static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 	"Watchdog cannot be stopped once started (default="
-	__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+	__stringify(WATCHDOG_NOWAYOUT) ")");
 
 static int kempld_wdt_set_stage_action(struct kempld_wdt_data *wdt_data,
 					struct kempld_wdt_stage *stage,
@@ -146,12 +137,7 @@ static int kempld_wdt_set_stage_timeout(struct kempld_wdt_data *wdt_data,
 	u32 remainder;
 	u8 stage_cfg;
 
-#if GCC_VERSION < 40400
-	/* work around a bug compiling do_div() */
-	prescaler = READ_ONCE(kempld_prescaler[PRESCALER_21]);
-#else
 	prescaler = kempld_prescaler[PRESCALER_21];
-#endif
 
 	if (!stage)
 		return -EINVAL;
@@ -472,7 +458,7 @@ static int kempld_wdt_probe(struct platform_device *pdev)
 			KEMPLD_WDT_CFG_GLOBAL_LOCK)) {
 		if (!nowayout)
 			dev_warn(dev,
-				"Forcing nowayout - watchdog lock enabled!\n");
+				 "Forcing nowayout - watchdog lock enabled!\n");
 		nowayout = true;
 	}
 
@@ -497,7 +483,9 @@ static int kempld_wdt_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, wdt_data);
-	ret = watchdog_register_device(wdd);
+	watchdog_stop_on_reboot(wdd);
+	watchdog_stop_on_unregister(wdd);
+	ret = devm_watchdog_register_device(dev, wdd);
 	if (ret)
 		return ret;
 
@@ -506,27 +494,6 @@ static int kempld_wdt_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void kempld_wdt_shutdown(struct platform_device *pdev)
-{
-	struct kempld_wdt_data *wdt_data = platform_get_drvdata(pdev);
-
-	kempld_wdt_stop(&wdt_data->wdd);
-}
-
-static int kempld_wdt_remove(struct platform_device *pdev)
-{
-	struct kempld_wdt_data *wdt_data = platform_get_drvdata(pdev);
-	struct watchdog_device *wdd = &wdt_data->wdd;
-	int ret = 0;
-
-	if (!nowayout)
-		ret = kempld_wdt_stop(wdd);
-	watchdog_unregister_device(wdd);
-
-	return ret;
-}
-
-#ifdef CONFIG_PM
 /* Disable watchdog if it is active during suspend */
 static int kempld_wdt_suspend(struct platform_device *pdev,
 				pm_message_t message)
@@ -562,20 +529,14 @@ static int kempld_wdt_resume(struct platform_device *pdev)
 	else
 		return kempld_wdt_stop(wdd);
 }
-#else
-#define kempld_wdt_suspend	NULL
-#define kempld_wdt_resume	NULL
-#endif
 
 static struct platform_driver kempld_wdt_driver = {
 	.driver		= {
 		.name	= "kempld-wdt",
 	},
 	.probe		= kempld_wdt_probe,
-	.remove		= kempld_wdt_remove,
-	.shutdown	= kempld_wdt_shutdown,
-	.suspend	= kempld_wdt_suspend,
-	.resume		= kempld_wdt_resume,
+	.suspend	= pm_ptr(kempld_wdt_suspend),
+	.resume		= pm_ptr(kempld_wdt_resume),
 };
 
 module_platform_driver(kempld_wdt_driver);

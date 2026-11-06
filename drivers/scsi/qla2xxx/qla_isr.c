@@ -1,11 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * QLogic Fibre Channel HBA Driver
  * Copyright (c)  2003-2014 QLogic Corporation
- *
- * See LICENSE.qla2xxx for copyright and licensing details.
  */
 #include "qla_def.h"
 #include "qla_target.h"
+#include "qla_gbl.h"
 
 #include <linux/delay.h>
 #include <linux/slab.h>
@@ -19,13 +19,396 @@
 
 static void qla2x00_mbx_completion(scsi_qla_host_t *, uint16_t);
 static void qla2x00_status_entry(scsi_qla_host_t *, struct rsp_que *, void *);
-static void qla2x00_status_cont_entry(struct rsp_que *, sts_cont_entry_t *);
+static void qla2x00_status_cont_entry(struct rsp_que *, void *, u32);
 static int qla2x00_error_entry(scsi_qla_host_t *, struct rsp_que *,
 	sts_entry_t *);
+static void qla27xx_process_purex_fpin(struct scsi_qla_host *vha,
+	struct purex_item *item);
+static struct purex_item *qla24xx_alloc_purex_item(scsi_qla_host_t *vha,
+	uint16_t size);
+static struct purex_item *qla24xx_copy_std_pkt(struct scsi_qla_host *vha,
+	void *pkt);
+static struct purex_item *qla27xx_copy_fpin_pkt(struct scsi_qla_host *vha,
+	void **pkt, struct rsp_que **rsp);
+
+static void
+qla27xx_process_purex_fpin(struct scsi_qla_host *vha, struct purex_item *item)
+{
+	void *pkt = &item->iocb;
+	uint16_t pkt_size = item->size;
+
+	ql_dbg(ql_dbg_init + ql_dbg_verbose, vha, 0x508d,
+	       "%s: Enter\n", __func__);
+
+	ql_dbg(ql_dbg_init + ql_dbg_verbose, vha, 0x508e,
+	       "-------- ELS REQ -------\n");
+	ql_dump_buffer(ql_dbg_init + ql_dbg_verbose, vha, 0x508f,
+		       pkt, pkt_size);
+
+	fc_host_fpin_rcv(vha->host, pkt_size, (char *)pkt, 0);
+}
+
+const char *const port_state_str[] = {
+	[FCS_UNKNOWN]		= "Unknown",
+	[FCS_UNCONFIGURED]	= "UNCONFIGURED",
+	[FCS_DEVICE_DEAD]	= "DEAD",
+	[FCS_DEVICE_LOST]	= "LOST",
+	[FCS_ONLINE]		= "ONLINE"
+};
+
+#define SFP_DISABLE_LASER_INITIATED    0x15  /* Sub code of 8070 AEN */
+#define SFP_ENABLE_LASER_INITIATED     0x16  /* Sub code of 8070 AEN */
+
+static inline void display_Laser_info(scsi_qla_host_t *vha,
+				      u16 mb1, u16 mb2, u16 mb3) {
+
+	if (mb1 == SFP_DISABLE_LASER_INITIATED)
+		ql_log(ql_log_warn, vha, 0xf0a2,
+		       "SFP temperature (%d C) reached/exceeded the threshold (%d C). Laser is disabled.\n",
+		       mb3, mb2);
+	if (mb1 == SFP_ENABLE_LASER_INITIATED)
+		ql_log(ql_log_warn, vha, 0xf0a3,
+		       "SFP temperature (%d C) reached normal operating level. Laser is enabled.\n",
+		       mb3);
+}
+
+/*
+ * Type-generic helpers for qla24xx_process_abts().
+ * Both abts_entry_24xx and abts_entry_24xx_ext share field names for all
+ * accessed fields, so these macros expand correctly for either type.
+ */
+#define QLA_LOG_ABTS_RCV(vha, abts_ptr) do {				\
+	ql_log(ql_log_warn, (vha), 0x0287,				\
+	    "Processing ABTS xchg=%#x oxid=%#x rxid=%#x "		\
+	    "seqid=%#x seqcnt=%#x\n",					\
+	    (abts_ptr)->rx_xch_addr_to_abort, (abts_ptr)->ox_id,	\
+	    (abts_ptr)->rx_id, (abts_ptr)->seq_id,			\
+	    (abts_ptr)->seq_cnt);					\
+	ql_dbg(ql_dbg_init + ql_dbg_verbose, (vha), 0x0287,		\
+	    "-------- ABTS RCV -------\n");				\
+	ql_dump_buffer(ql_dbg_init + ql_dbg_verbose, (vha), 0x0287,	\
+	    (uint8_t *)(abts_ptr), sizeof(*(abts_ptr)));		\
+} while (0)
+
+#define QLA_BUILD_ABTS_BA_ACC(rsp, src, fctl) do {			\
+	memset((rsp), 0, sizeof(*(rsp)));				\
+	(rsp)->entry_type = ABTS_RSP_TYPE;				\
+	(rsp)->entry_count = 1;						\
+	(rsp)->nport_handle = (src)->nport_handle;			\
+	(rsp)->rx_xch_addr = (src)->rx_xch_addr;			\
+	(rsp)->d_id[0] = (src)->s_id[0];				\
+	(rsp)->d_id[1] = (src)->s_id[1];				\
+	(rsp)->d_id[2] = (src)->s_id[2];				\
+	(rsp)->r_ctl = FC_ROUTING_BLD | FC_R_CTL_BLD_BA_ACC;		\
+	(rsp)->s_id[0] = (src)->d_id[0];				\
+	(rsp)->s_id[1] = (src)->d_id[1];				\
+	(rsp)->s_id[2] = (src)->d_id[2];				\
+	(rsp)->cs_ctl = (src)->cs_ctl;					\
+	(fctl) = ~((src)->f_ctl[2] | 0x7F) << 16 |			\
+	    FC_F_CTL_LAST_SEQ | FC_F_CTL_END_SEQ | FC_F_CTL_SEQ_INIT;	\
+	(rsp)->f_ctl[0] = (fctl) >> 0 & 0xff;				\
+	(rsp)->f_ctl[1] = (fctl) >> 8 & 0xff;				\
+	(rsp)->f_ctl[2] = (fctl) >> 16 & 0xff;				\
+	(rsp)->type = FC_TYPE_BLD;					\
+	(rsp)->rx_id = (src)->rx_id;					\
+	(rsp)->ox_id = (src)->ox_id;					\
+	(rsp)->payload.ba_acc.aborted_rx_id = (src)->rx_id;		\
+	(rsp)->payload.ba_acc.aborted_ox_id = (src)->ox_id;		\
+	(rsp)->payload.ba_acc.high_seq_cnt = cpu_to_le16(~0);		\
+	(rsp)->rx_xch_addr_to_abort = (src)->rx_xch_addr_to_abort;	\
+} while (0)
+
+#define QLA_LOG_ISSUE_ABTS_RSP(vha, rsp, dma, rval) do {		\
+	ql_dbg(ql_dbg_init, (vha), 0x028b,				\
+	    "Sending BA ACC response to ABTS %#x...\n",			\
+	    (rsp)->rx_xch_addr_to_abort);				\
+	ql_dbg(ql_dbg_init + ql_dbg_verbose, (vha), 0x028b,		\
+	    "-------- ELS RSP -------\n");				\
+	ql_dump_buffer(ql_dbg_init + ql_dbg_verbose, (vha), 0x028b,	\
+	    (uint8_t *)(rsp), sizeof(*(rsp)));				\
+	(rval) = qla2x00_issue_iocb((vha), (rsp), (dma), 0);		\
+	if (rval) {							\
+		ql_log(ql_log_warn, (vha), 0x028c,			\
+		    "%s: iocb failed to execute -> %x\n",		\
+		    __func__, (rval));					\
+	} else if ((rsp)->comp_status) {				\
+		ql_log(ql_log_warn, (vha), 0x028d,			\
+		    "%s: iocb failed to complete -> "			\
+		    "completion=%#x subcode=(%#x,%#x)\n",		\
+		    __func__, (rsp)->comp_status,			\
+		    (rsp)->payload.error.subcode1,			\
+		    (rsp)->payload.error.subcode2);			\
+	} else {							\
+		ql_dbg(ql_dbg_init, (vha), 0x028ea,			\
+		    "%s: done.\n", __func__);				\
+	}								\
+} while (0)
+
+static void
+qla24xx_process_abts(struct scsi_qla_host *vha, struct purex_item *pkt)
+{
+	struct qla_hw_data *ha = vha->hw;
+	struct abts_entry_24xx *abts = NULL;
+	struct abts_entry_24xx_ext *abts_ext = NULL;
+	struct els_entry_24xx *rsp_els;
+	dma_addr_t dma;
+	__le32 rx_xch_addr_to_abort;
+	uint32_t fctl;
+	int rval;
+	void *rsp_pkt;
+	size_t rsp_sz;
+
+	ql_dbg(ql_dbg_init, vha, 0x0286, "%s: entered.\n", __func__);
+
+	if (IS_QLA29XX(ha)) {
+		abts_ext = (struct abts_entry_24xx_ext *)&pkt->iocb;
+		QLA_LOG_ABTS_RCV(vha, abts_ext);
+		rsp_sz = sizeof(struct els_entry_24xx_ext);
+		rx_xch_addr_to_abort = abts_ext->rx_xch_addr_to_abort;
+	} else {
+		abts = (struct abts_entry_24xx *)&pkt->iocb;
+		QLA_LOG_ABTS_RCV(vha, abts);
+		rsp_sz = sizeof(struct els_entry_24xx);
+		rx_xch_addr_to_abort = abts->rx_xch_addr_to_abort;
+	}
+
+	rsp_pkt = dma_alloc_coherent(&ha->pdev->dev, rsp_sz, &dma,
+	    GFP_KERNEL);
+	if (!rsp_pkt) {
+		ql_log(ql_log_warn, vha, 0x0287,
+		    "Failed allocate dma buffer ABTS/ELS RSP.\n");
+		return;
+	}
+	rsp_els = rsp_pkt;
+
+	/* terminate exchange */
+	memset(rsp_pkt, 0, rsp_sz);
+	rsp_els->entry_type = ELS_IOCB_TYPE;
+	rsp_els->entry_count = 1;
+	rsp_els->nport_handle = cpu_to_le16(~0);
+	rsp_els->rx_xchg_address = rx_xch_addr_to_abort;
+	rsp_els->control_flags = cpu_to_le16(EPD_RX_XCHG);
+	ql_dbg(ql_dbg_init, vha, 0x0283,
+	    "Sending ELS Response to terminate exchange %#x...\n",
+	    rx_xch_addr_to_abort);
+	ql_dbg(ql_dbg_init + ql_dbg_verbose, vha, 0x0283,
+	    "-------- ELS RSP -------\n");
+	ql_dump_buffer(ql_dbg_init + ql_dbg_verbose, vha, 0x0283,
+	    (uint8_t *)rsp_pkt, rsp_sz);
+	rval = qla2x00_issue_iocb(vha, rsp_pkt, dma, 0);
+	if (rval) {
+		ql_log(ql_log_warn, vha, 0x0288,
+		    "%s: iocb failed to execute -> %x\n", __func__, rval);
+	} else if (rsp_els->comp_status) {
+		ql_log(ql_log_warn, vha, 0x0289,
+		    "%s: iocb failed to complete -> completion=%#x subcode=(%#x,%#x)\n",
+		    __func__, rsp_els->comp_status,
+		    rsp_els->error_subcode_1, rsp_els->error_subcode_2);
+	} else {
+		ql_dbg(ql_dbg_init, vha, 0x028a,
+		    "%s: abort exchange done.\n", __func__);
+	}
+
+	/* send ABTS response */
+	if (IS_QLA29XX(ha)) {
+		struct abts_entry_24xx_ext *rsp_ext = rsp_pkt;
+
+		QLA_BUILD_ABTS_BA_ACC(rsp_ext, abts_ext, fctl);
+		rsp_ext->vp_idx_sof = qla_ext_build_vp_sof(
+		    qla_ext_get_vp_index(abts_ext->vp_idx_sof),
+		    qla_ext_get_sof_type(abts_ext->vp_idx_sof));
+		QLA_LOG_ISSUE_ABTS_RSP(vha, rsp_ext, dma, rval);
+	} else {
+		struct abts_entry_24xx *abts_rsp = rsp_pkt;
+
+		QLA_BUILD_ABTS_BA_ACC(abts_rsp, abts, fctl);
+		abts_rsp->vp_idx = abts->vp_idx;
+		abts_rsp->sof_type = abts->sof_type & 0xf0;
+		QLA_LOG_ISSUE_ABTS_RSP(vha, abts_rsp, dma, rval);
+	}
+
+	dma_free_coherent(&ha->pdev->dev, rsp_sz, rsp_pkt, dma);
+}
+
+#undef QLA_LOG_ABTS_RCV
+#undef QLA_BUILD_ABTS_BA_ACC
+#undef QLA_LOG_ISSUE_ABTS_RSP
+
+/**
+ * __qla_consume_iocb - this routine is used to tell fw driver has processed
+ *   or consumed the head IOCB along with the continuation IOCB's from the
+ *   provided respond queue.
+ * @vha: host adapter pointer
+ * @pkt: pointer to current packet.  On return, this pointer shall move
+ *       to the next packet.
+ * @rsp: respond queue pointer.
+ *
+ * it is assumed pkt is the head iocb, not the continuation iocbk
+ */
+void __qla_consume_iocb(struct scsi_qla_host *vha,
+	void **pkt, struct rsp_que **rsp)
+{
+	struct rsp_que *rsp_q = *rsp;
+	response_t *new_pkt;
+	uint16_t entry_count_remaining;
+	/*
+	 * entry_count is u8 at offset 1 in both purex_entry_24xx and
+	 * purex_entry_24xx_ext, so the 24xx view is layout-compatible with
+	 * either stride.
+	 */
+	struct purex_entry_24xx *purex = *pkt;
+
+	entry_count_remaining = purex->entry_count;
+
+	/*
+	 * The caller already advanced ring_ptr past the head IOCB, so mark
+	 * the head processed and account for it here, then consume only the
+	 * continuation IOCBs that follow.
+	 */
+	((response_t *)purex)->signature = RESPONSE_PROCESSED;
+	/* flush signature */
+	wmb();
+	--entry_count_remaining;
+
+	while (entry_count_remaining > 0) {
+		new_pkt = rsp_q->ring_ptr;
+		*pkt = new_pkt;
+
+		qla_rsp_ring_advance(rsp_q);
+
+		new_pkt->signature = RESPONSE_PROCESSED;
+		/* flush signature */
+		wmb();
+		--entry_count_remaining;
+	}
+}
+
+/**
+ * __qla_copy_purex_to_buffer - extract ELS payload from Purex IOCB
+ *    and save to provided buffer
+ * @vha: host adapter pointer
+ * @pkt: pointer Purex IOCB
+ * @rsp: respond queue
+ * @buf: extracted ELS payload copy here
+ * @buf_len: buffer length
+ */
+int __qla_copy_purex_to_buffer(struct scsi_qla_host *vha,
+	void **pkt, struct rsp_que **rsp, u8 *buf, u32 buf_len)
+{
+	/*
+	 * purex_entry_24xx_ext overlays purex_entry_24xx for entry_count
+	 * (offset 1), frame_size (offset 12) and els_frame_payload (offset
+	 * 44, base address only -- the array size grows from 20 to 84
+	 * bytes).  Header fields are read through the 24xx view; the
+	 * initial payload memcpy uses a purex_entry_24xx_ext pointer on
+	 * 29xx so that FORTIFY_SOURCE sees the correct 84-byte source.
+	 */
+	struct purex_entry_24xx *purex = *pkt;
+	struct qla_hw_data *ha = vha->hw;
+	struct rsp_que *rsp_q = *rsp;
+	size_t payload_size = IS_QLA29XX(ha) ?
+		sizeof_field(struct purex_entry_24xx_ext, els_frame_payload) :
+		sizeof_field(struct purex_entry_24xx, els_frame_payload);
+	u8 *data;
+	u32 data_sz;
+	uint16_t no_bytes = 0, total_bytes = 0, pending_bytes = 0;
+	uint16_t buffer_copy_offset = 0;
+	uint16_t entry_count_remaining;
+	u16 tpad;
+
+	entry_count_remaining = purex->entry_count;
+	total_bytes = (le16_to_cpu(purex->frame_size) & 0x0FFF) -
+		PURX_ELS_HEADER_SIZE;
+
+	/*
+	 * end of payload may not end in 4bytes boundary.  Need to
+	 * round up / pad for room to swap, before saving data
+	 */
+	tpad = roundup(total_bytes, 4);
+
+	if (buf_len < tpad) {
+		ql_dbg(ql_dbg_async, vha, 0x5084,
+		    "%s buffer is too small %d < %d\n",
+		    __func__, buf_len, tpad);
+		__qla_consume_iocb(vha, pkt, rsp);
+		return -EIO;
+	}
+
+	pending_bytes = total_bytes = tpad;
+	no_bytes = (pending_bytes > payload_size) ?
+		payload_size : pending_bytes;
+	if (IS_QLA29XX(ha)) {
+		struct purex_entry_24xx_ext *purex_ext = *pkt;
+
+		memcpy(buf, &purex_ext->els_frame_payload[0], no_bytes);
+	} else {
+		memcpy(buf, &purex->els_frame_payload[0], no_bytes);
+	}
+	buffer_copy_offset += no_bytes;
+	pending_bytes -= no_bytes;
+	--entry_count_remaining;
+
+	/*
+	 * response_t::signature and struct response_ext::signature are both u32
+	 * at offset 60 (handle:4 + data[52]:60), so the 24xx view writes
+	 * the right slot regardless of stride.
+	 */
+	((response_t *)purex)->signature = RESPONSE_PROCESSED;
+	/* flush signature */
+	wmb();
+
+	do {
+		while ((total_bytes > 0) && (entry_count_remaining > 0)) {
+			*pkt = rsp_q->ring_ptr;
+			data = ((sts_cont_entry_t *)*pkt)->data;
+			data_sz = qla_sts_cont_data_size(ha);
+
+			if (((sts_cont_entry_t *)*pkt)->entry_type !=
+			    STATUS_CONT_TYPE) {
+				ql_log(ql_log_warn, vha, 0x507a,
+				    "Unexpected IOCB type, partial data 0x%x\n",
+				    buffer_copy_offset);
+				break;
+			}
+
+			qla_rsp_ring_advance(rsp_q);
+			no_bytes = (pending_bytes > data_sz) ?
+			    data_sz : pending_bytes;
+			if ((buffer_copy_offset + no_bytes) <= total_bytes) {
+				memcpy((buf + buffer_copy_offset), data,
+				    no_bytes);
+				buffer_copy_offset += no_bytes;
+				pending_bytes -= no_bytes;
+				--entry_count_remaining;
+			} else {
+				ql_log(ql_log_warn, vha, 0x5044,
+				    "Attempt to copy more that we got, optimizing..%x\n",
+				    buffer_copy_offset);
+				memcpy((buf + buffer_copy_offset), data,
+				    total_bytes - buffer_copy_offset);
+			}
+
+			((response_t *)*pkt)->signature = RESPONSE_PROCESSED;
+			/* flush signature */
+			wmb();
+		}
+
+		if (pending_bytes != 0 || entry_count_remaining != 0) {
+			ql_log(ql_log_fatal, vha, 0x508b,
+			    "Dropping partial Data, underrun bytes = 0x%x, entry cnts 0x%x\n",
+			    total_bytes, entry_count_remaining);
+			return -EIO;
+		}
+	} while (entry_count_remaining > 0);
+
+	be32_to_cpu_array((u32 *)buf, (__be32 *)buf, total_bytes >> 2);
+
+	return 0;
+}
 
 /**
  * qla2100_intr_handler() - Process interrupts for the ISP2100 and ISP2200.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.
@@ -41,7 +424,7 @@ qla2100_intr_handler(int irq, void *dev_id)
 	int		status;
 	unsigned long	iter;
 	uint16_t	hccr;
-	uint16_t	mb[4];
+	uint16_t	mb[8];
 	struct rsp_que *rsp;
 	unsigned long	flags;
 
@@ -59,7 +442,7 @@ qla2100_intr_handler(int irq, void *dev_id)
 	spin_lock_irqsave(&ha->hardware_lock, flags);
 	vha = pci_get_drvdata(ha->pdev);
 	for (iter = 50; iter--; ) {
-		hccr = RD_REG_WORD(&reg->hccr);
+		hccr = rd_reg_word(&reg->hccr);
 		if (qla2x00_check_reg16_for_disconnect(vha, hccr))
 			break;
 		if (hccr & HCCR_RISC_PAUSE) {
@@ -71,18 +454,18 @@ qla2100_intr_handler(int irq, void *dev_id)
 			 * bit to be cleared.  Schedule a big hammer to get
 			 * out of the RISC PAUSED state.
 			 */
-			WRT_REG_WORD(&reg->hccr, HCCR_RESET_RISC);
-			RD_REG_WORD(&reg->hccr);
+			wrt_reg_word(&reg->hccr, HCCR_RESET_RISC);
+			rd_reg_word(&reg->hccr);
 
-			ha->isp_ops->fw_dump(vha, 1);
+			ha->isp_ops->fw_dump(vha);
 			set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 			break;
-		} else if ((RD_REG_WORD(&reg->istatus) & ISR_RISC_INT) == 0)
+		} else if ((rd_reg_word(&reg->istatus) & ISR_RISC_INT) == 0)
 			break;
 
-		if (RD_REG_WORD(&reg->semaphore) & BIT_0) {
-			WRT_REG_WORD(&reg->hccr, HCCR_CLR_RISC_INT);
-			RD_REG_WORD(&reg->hccr);
+		if (rd_reg_word(&reg->semaphore) & BIT_0) {
+			wrt_reg_word(&reg->hccr, HCCR_CLR_RISC_INT);
+			rd_reg_word(&reg->hccr);
 
 			/* Get mailbox data. */
 			mb[0] = RD_MAILBOX_REG(ha, reg, 0);
@@ -101,13 +484,13 @@ qla2100_intr_handler(int irq, void *dev_id)
 				    mb[0]);
 			}
 			/* Release mailbox registers. */
-			WRT_REG_WORD(&reg->semaphore, 0);
-			RD_REG_WORD(&reg->semaphore);
+			wrt_reg_word(&reg->semaphore, 0);
+			rd_reg_word(&reg->semaphore);
 		} else {
 			qla2x00_process_response_queue(rsp);
 
-			WRT_REG_WORD(&reg->hccr, HCCR_CLR_RISC_INT);
-			RD_REG_WORD(&reg->hccr);
+			wrt_reg_word(&reg->hccr, HCCR_CLR_RISC_INT);
+			rd_reg_word(&reg->hccr);
 		}
 	}
 	qla2x00_handle_mbx_completion(ha, status);
@@ -124,12 +507,7 @@ qla2x00_check_reg32_for_disconnect(scsi_qla_host_t *vha, uint32_t reg)
 		if (!test_and_set_bit(PFLG_DISCONNECTED, &vha->pci_flags) &&
 		    !test_bit(PFLG_DRIVER_REMOVING, &vha->pci_flags) &&
 		    !test_bit(PFLG_DRIVER_PROBING, &vha->pci_flags)) {
-			/*
-			 * Schedule this (only once) on the default system
-			 * workqueue so that all the adapter workqueues and the
-			 * DPC thread can be shutdown cleanly.
-			 */
-			schedule_work(&vha->hw->board_disable);
+			qla_schedule_eeh_work(vha);
 		}
 		return true;
 	} else
@@ -144,7 +522,7 @@ qla2x00_check_reg16_for_disconnect(scsi_qla_host_t *vha, uint16_t reg)
 
 /**
  * qla2300_intr_handler() - Process interrupts for the ISP23xx and ISP63xx.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.
@@ -160,7 +538,7 @@ qla2300_intr_handler(int irq, void *dev_id)
 	unsigned long	iter;
 	uint32_t	stat;
 	uint16_t	hccr;
-	uint16_t	mb[4];
+	uint16_t	mb[8];
 	struct rsp_que *rsp;
 	struct qla_hw_data *ha;
 	unsigned long	flags;
@@ -179,14 +557,14 @@ qla2300_intr_handler(int irq, void *dev_id)
 	spin_lock_irqsave(&ha->hardware_lock, flags);
 	vha = pci_get_drvdata(ha->pdev);
 	for (iter = 50; iter--; ) {
-		stat = RD_REG_DWORD(&reg->u.isp2300.host_status);
+		stat = rd_reg_dword(&reg->u.isp2300.host_status);
 		if (qla2x00_check_reg32_for_disconnect(vha, stat))
 			break;
 		if (stat & HSR_RISC_PAUSED) {
 			if (unlikely(pci_channel_offline(ha->pdev)))
 				break;
 
-			hccr = RD_REG_WORD(&reg->hccr);
+			hccr = rd_reg_word(&reg->hccr);
 
 			if (hccr & (BIT_15 | BIT_13 | BIT_11 | BIT_8))
 				ql_log(ql_log_warn, vha, 0x5026,
@@ -202,10 +580,10 @@ qla2300_intr_handler(int irq, void *dev_id)
 			 * interrupt bit to be cleared.  Schedule a big
 			 * hammer to get out of the RISC PAUSED state.
 			 */
-			WRT_REG_WORD(&reg->hccr, HCCR_RESET_RISC);
-			RD_REG_WORD(&reg->hccr);
+			wrt_reg_word(&reg->hccr, HCCR_RESET_RISC);
+			rd_reg_word(&reg->hccr);
 
-			ha->isp_ops->fw_dump(vha, 1);
+			ha->isp_ops->fw_dump(vha);
 			set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 			break;
 		} else if ((stat & HSR_RISC_INT) == 0)
@@ -220,7 +598,7 @@ qla2300_intr_handler(int irq, void *dev_id)
 			status |= MBX_INTERRUPT;
 
 			/* Release mailbox registers. */
-			WRT_REG_WORD(&reg->semaphore, 0);
+			wrt_reg_word(&reg->semaphore, 0);
 			break;
 		case 0x12:
 			mb[0] = MSW(stat);
@@ -248,8 +626,8 @@ qla2300_intr_handler(int irq, void *dev_id)
 			    "Unrecognized interrupt type (%d).\n", stat & 0xff);
 			break;
 		}
-		WRT_REG_WORD(&reg->hccr, HCCR_CLR_RISC_INT);
-		RD_REG_WORD_RELAXED(&reg->hccr);
+		wrt_reg_word(&reg->hccr, HCCR_CLR_RISC_INT);
+		rd_reg_word_relaxed(&reg->hccr);
 	}
 	qla2x00_handle_mbx_completion(ha, status);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
@@ -259,7 +637,7 @@ qla2300_intr_handler(int irq, void *dev_id)
 
 /**
  * qla2x00_mbx_completion() - Process mailbox command completions.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
  * @mb0: Mailbox0 register
  */
 static void
@@ -267,7 +645,7 @@ qla2x00_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 {
 	uint16_t	cnt;
 	uint32_t	mboxes;
-	uint16_t __iomem *wptr;
+	__le16 __iomem *wptr;
 	struct qla_hw_data *ha = vha->hw;
 	struct device_reg_2xxx __iomem *reg = &ha->iobase->isp;
 
@@ -283,15 +661,15 @@ qla2x00_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 	ha->flags.mbox_int = 1;
 	ha->mailbox_out[0] = mb0;
 	mboxes >>= 1;
-	wptr = (uint16_t __iomem *)MAILBOX_REG(ha, reg, 1);
+	wptr = MAILBOX_REG(ha, reg, 1);
 
 	for (cnt = 1; cnt < ha->mbx_count; cnt++) {
 		if (IS_QLA2200(ha) && cnt == 8)
-			wptr = (uint16_t __iomem *)MAILBOX_REG(ha, reg, 8);
+			wptr = MAILBOX_REG(ha, reg, 8);
 		if ((cnt == 4 || cnt == 5) && (mboxes & BIT_0))
 			ha->mailbox_out[cnt] = qla2x00_debounce_register(wptr);
 		else if (mboxes & BIT_0)
-			ha->mailbox_out[cnt] = RD_REG_WORD(wptr);
+			ha->mailbox_out[cnt] = rd_reg_word(wptr);
 
 		wptr++;
 		mboxes >>= 1;
@@ -306,19 +684,19 @@ qla81xx_idc_event(scsi_qla_host_t *vha, uint16_t aen, uint16_t descr)
 	int rval;
 	struct device_reg_24xx __iomem *reg24 = &vha->hw->iobase->isp24;
 	struct device_reg_82xx __iomem *reg82 = &vha->hw->iobase->isp82;
-	uint16_t __iomem *wptr;
+	__le16 __iomem *wptr;
 	uint16_t cnt, timeout, mb[QLA_IDC_ACK_REGS];
 
 	/* Seed data -- mailbox1 -> mailbox7. */
 	if (IS_QLA81XX(vha->hw) || IS_QLA83XX(vha->hw))
-		wptr = (uint16_t __iomem *)&reg24->mailbox1;
+		wptr = &reg24->mailbox1;
 	else if (IS_QLA8044(vha->hw))
-		wptr = (uint16_t __iomem *)&reg82->mailbox_out[1];
+		wptr = &reg82->mailbox_out[1];
 	else
 		return;
 
 	for (cnt = 0; cnt < QLA_IDC_ACK_REGS; cnt++, wptr++)
-		mb[cnt] = RD_REG_WORD(wptr);
+		mb[cnt] = rd_reg_word(wptr);
 
 	ql_dbg(ql_dbg_async, vha, 0x5021,
 	    "Inter-Driver Communication %s -- "
@@ -364,9 +742,9 @@ const char *
 qla2x00_get_link_speed_str(struct qla_hw_data *ha, uint16_t speed)
 {
 	static const char *const link_speeds[] = {
-		"1", "2", "?", "4", "8", "16", "32", "10"
+		"1", "2", "?", "4", "8", "16", "32", "64", "128", "10"
 	};
-#define	QLA_LAST_SPEED	7
+#define	QLA_LAST_SPEED (ARRAY_SIZE(link_speeds) - 1)
 
 	if (IS_QLA2100(ha) || IS_QLA2200(ha))
 		return link_speeds[0];
@@ -539,6 +917,140 @@ qla83xx_handle_8200_aen(scsi_qla_host_t *vha, uint16_t *mb)
 	}
 }
 
+/**
+ * qla27xx_copy_multiple_pkt() - Copy over purex/purls packets that can
+ * span over multiple IOCBs.
+ * @vha: SCSI driver HA context
+ * @pkt: ELS packet
+ * @rsp: Response queue
+ * @is_purls: True, for Unsolicited Received FC-NVMe LS rsp IOCB
+ *            false, for Unsolicited Received ELS IOCB
+ * @byte_order: True, to change the byte ordering of iocb payload
+ */
+struct purex_item *
+qla27xx_copy_multiple_pkt(struct scsi_qla_host *vha, void **pkt,
+			  struct rsp_que **rsp, bool is_purls,
+			  bool byte_order)
+{
+	struct purex_entry_24xx_ext *purex_ext = NULL;
+	struct purex_entry_24xx *purex = NULL;
+	struct pt_ls4_rx_unsol *purls = NULL;
+	struct qla_hw_data *ha = vha->hw;
+	struct rsp_que *rsp_q = *rsp;
+	uint16_t no_bytes = 0, total_bytes = 0, pending_bytes = 0;
+	uint16_t buffer_copy_offset = 0, payload_size = 0;
+	uint16_t entry_count, entry_count_remaining;
+	struct purex_item *item;
+	void *iocb_pkt = NULL;
+	u8 *data;
+	u32 data_sz;
+
+	if (is_purls) {
+		purls = *pkt;
+		total_bytes = (le16_to_cpu(purls->frame_size) & 0x0FFF) -
+			      PURX_ELS_HEADER_SIZE;
+		entry_count = entry_count_remaining = purls->entry_count;
+		payload_size = sizeof(purls->payload);
+	} else if (IS_QLA29XX(ha)) {
+		purex_ext = *pkt;
+		total_bytes = (le16_to_cpu(purex_ext->frame_size) & 0x0FFF) -
+			      PURX_ELS_HEADER_SIZE;
+		entry_count = entry_count_remaining =
+		    purex_ext->entry_count;
+		payload_size = sizeof(purex_ext->els_frame_payload);
+	} else {
+		purex = *pkt;
+		total_bytes = (le16_to_cpu(purex->frame_size) & 0x0FFF) -
+			      PURX_ELS_HEADER_SIZE;
+		entry_count = entry_count_remaining = purex->entry_count;
+		payload_size = sizeof(purex->els_frame_payload);
+	}
+
+	if (total_bytes > QLA_MAX_IOCB_SIZE)
+		total_bytes = QLA_MAX_IOCB_SIZE;
+
+	pending_bytes = total_bytes;
+	no_bytes = (pending_bytes > payload_size) ? payload_size :
+		   pending_bytes;
+	ql_dbg(ql_dbg_async, vha, 0x509a,
+	       "%s LS, frame_size 0x%x, entry count %d\n",
+	       (is_purls ? "PURLS" : "FPIN"), total_bytes, entry_count);
+
+	item = qla24xx_alloc_purex_item(vha, total_bytes);
+	if (!item)
+		return item;
+
+	iocb_pkt = &item->iocb;
+
+	if (is_purls)
+		memcpy(iocb_pkt, &purls->payload[0], no_bytes);
+	else if (IS_QLA29XX(ha))
+		memcpy(iocb_pkt, &purex_ext->els_frame_payload[0], no_bytes);
+	else
+		memcpy(iocb_pkt, &purex->els_frame_payload[0], no_bytes);
+	buffer_copy_offset += no_bytes;
+	pending_bytes -= no_bytes;
+	--entry_count_remaining;
+
+	if (is_purls)
+		((response_t *)purls)->signature = RESPONSE_PROCESSED;
+	else if (IS_QLA29XX(ha))
+		((struct response_ext *)purex_ext)->signature = RESPONSE_PROCESSED;
+	else
+		((response_t *)purex)->signature = RESPONSE_PROCESSED;
+	wmb();
+
+	do {
+		while ((total_bytes > 0) && (entry_count_remaining > 0)) {
+			*pkt = rsp_q->ring_ptr;
+			data = ((sts_cont_entry_t *)*pkt)->data;
+			data_sz = qla_sts_cont_data_size(ha);
+
+			if (((sts_cont_entry_t *)*pkt)->entry_type !=
+			    STATUS_CONT_TYPE) {
+				ql_log(ql_log_warn, vha, 0x507a,
+				       "Unexpected IOCB type, partial data 0x%x\n",
+				       buffer_copy_offset);
+				break;
+			}
+
+			qla_rsp_ring_advance(rsp_q);
+			no_bytes = (pending_bytes > data_sz) ?
+				   data_sz : pending_bytes;
+			if ((buffer_copy_offset + no_bytes) <= total_bytes) {
+				memcpy(((uint8_t *)iocb_pkt +
+					buffer_copy_offset), data, no_bytes);
+				buffer_copy_offset += no_bytes;
+				pending_bytes -= no_bytes;
+				--entry_count_remaining;
+			} else {
+				ql_log(ql_log_warn, vha, 0x5044,
+				       "Attempt to copy more that we got, optimizing..%x\n",
+				       buffer_copy_offset);
+				memcpy(((uint8_t *)iocb_pkt +
+					buffer_copy_offset), data,
+					total_bytes - buffer_copy_offset);
+			}
+
+			((response_t *)*pkt)->signature = RESPONSE_PROCESSED;
+			wmb();
+		}
+
+		if (pending_bytes != 0 || entry_count_remaining != 0) {
+			ql_log(ql_log_fatal, vha, 0x508b,
+			       "Dropping partial FPIN, underrun bytes = 0x%x, entry cnts 0x%x\n",
+			       total_bytes, entry_count_remaining);
+			qla24xx_free_purex_item(item);
+			return NULL;
+		}
+	} while (entry_count_remaining > 0);
+
+	if (byte_order)
+		host_to_fcp_swap((uint8_t *)&item->iocb, total_bytes);
+
+	return item;
+}
+
 int
 qla2x00_is_a_vp_did(scsi_qla_host_t *vha, uint32_t rscn_entry)
 {
@@ -611,9 +1123,225 @@ qla2x00_find_fcport_by_nportid(scsi_qla_host_t *vha, port_id_t *id,
 	return NULL;
 }
 
+/* Shall be called only on supported adapters. */
+static void
+qla27xx_handle_8200_aen(scsi_qla_host_t *vha, uint16_t *mb)
+{
+	struct qla_hw_data *ha = vha->hw;
+	bool reset_isp_needed = false;
+
+	ql_log(ql_log_warn, vha, 0x02f0,
+	       "MPI Heartbeat stop. MPI reset is%s needed. "
+	       "MB0[%xh] MB1[%xh] MB2[%xh] MB3[%xh]\n",
+	       mb[1] & BIT_8 ? "" : " not",
+	       mb[0], mb[1], mb[2], mb[3]);
+
+	if ((mb[1] & BIT_8) == 0)
+		return;
+
+	ql_log(ql_log_warn, vha, 0x02f1,
+	       "MPI Heartbeat stop. FW dump needed\n");
+
+	if (ql2xfulldump_on_mpifail) {
+		ha->isp_ops->fw_dump(vha);
+		reset_isp_needed = true;
+	}
+
+	ha->isp_ops->mpi_fw_dump(vha, 1);
+
+	if (reset_isp_needed) {
+		vha->hw->flags.fw_init_done = 0;
+		set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
+		qla2xxx_wake_dpc(vha);
+	}
+}
+
+static struct purex_item *
+qla24xx_alloc_purex_item(scsi_qla_host_t *vha, uint16_t size)
+{
+	struct purex_item *item = NULL;
+	uint8_t item_hdr_size = sizeof(*item);
+
+	if (size > QLA_MAX_IOCB_SIZE) {
+		item = kzalloc(item_hdr_size +
+		    (size - QLA_MAX_IOCB_SIZE), GFP_ATOMIC);
+	} else {
+		if (atomic_inc_return(&vha->default_item.in_use) == 1) {
+			item = &vha->default_item;
+			goto initialize_purex_header;
+		} else {
+			item = kzalloc(item_hdr_size, GFP_ATOMIC);
+		}
+	}
+	if (!item) {
+		ql_log(ql_log_warn, vha, 0x5092,
+		       ">> Failed allocate purex list item.\n");
+
+		return NULL;
+	}
+
+initialize_purex_header:
+	item->vha = vha;
+	item->size = size;
+	return item;
+}
+
+void
+qla24xx_queue_purex_item(scsi_qla_host_t *vha, struct purex_item *pkt,
+			 void (*process_item)(struct scsi_qla_host *vha,
+					      struct purex_item *pkt))
+{
+	struct purex_list *list = &vha->purex_list;
+	ulong flags;
+
+	pkt->process_item = process_item;
+
+	spin_lock_irqsave(&list->lock, flags);
+	list_add_tail(&pkt->list, &list->head);
+	spin_unlock_irqrestore(&list->lock, flags);
+
+	set_bit(PROCESS_PUREX_IOCB, &vha->dpc_flags);
+}
+
+/**
+ * qla24xx_copy_std_pkt() - Copy over purex ELS which is
+ * contained in a single IOCB.
+ * purex packet.
+ * @vha: SCSI driver HA context
+ * @pkt: ELS packet
+ */
+static struct purex_item
+*qla24xx_copy_std_pkt(struct scsi_qla_host *vha, void *pkt)
+{
+	struct qla_hw_data *ha = vha->hw;
+	struct purex_item *item;
+	u16 copy_sz;
+
+	if (IS_QLA29XX(ha))
+		copy_sz = sizeof(struct purex_entry_24xx_ext);
+	else
+		copy_sz = QLA_DEFAULT_PAYLOAD_SIZE;
+
+	item = qla24xx_alloc_purex_item(vha, copy_sz);
+	if (!item)
+		return item;
+
+	memcpy(&item->iocb, pkt, copy_sz);
+	return item;
+}
+
+/**
+ * qla27xx_copy_fpin_pkt() - Copy over fpin packets that can
+ * span over multiple IOCBs.
+ * @vha: SCSI driver HA context
+ * @pkt: ELS packet
+ * @rsp: Response queue
+ */
+static struct purex_item *
+qla27xx_copy_fpin_pkt(struct scsi_qla_host *vha, void **pkt,
+		      struct rsp_que **rsp)
+{
+	struct purex_entry_24xx *purex = *pkt;
+	struct qla_hw_data *ha = vha->hw;
+	struct rsp_que *rsp_q = *rsp;
+	size_t payload_size = IS_QLA29XX(ha) ?
+		sizeof_field(struct purex_entry_24xx_ext, els_frame_payload) :
+		sizeof_field(struct purex_entry_24xx, els_frame_payload);
+	u8 *data;
+	u32 data_sz;
+	uint16_t no_bytes = 0, total_bytes = 0, pending_bytes = 0;
+	uint16_t buffer_copy_offset = 0;
+	uint16_t entry_count, entry_count_remaining;
+	struct purex_item *item;
+	void *fpin_pkt = NULL;
+
+	total_bytes = (le16_to_cpu(purex->frame_size) & 0x0FFF)
+	    - PURX_ELS_HEADER_SIZE;
+
+	if (total_bytes > QLA_MAX_IOCB_SIZE)
+		total_bytes = QLA_MAX_IOCB_SIZE;
+
+	pending_bytes = total_bytes;
+	entry_count = entry_count_remaining = purex->entry_count;
+	no_bytes = (pending_bytes > payload_size) ?
+		   payload_size : pending_bytes;
+	ql_log(ql_log_info, vha, 0x509a,
+	       "FPIN ELS, frame_size 0x%x, entry count %d\n",
+	       total_bytes, entry_count);
+
+	item = qla24xx_alloc_purex_item(vha, total_bytes);
+	if (!item)
+		return item;
+
+	fpin_pkt = &item->iocb;
+
+	if (IS_QLA29XX(ha)) {
+		struct purex_entry_24xx_ext *purex_ext = *pkt;
+
+		memcpy(fpin_pkt, &purex_ext->els_frame_payload[0], no_bytes);
+	} else {
+		memcpy(fpin_pkt, &purex->els_frame_payload[0], no_bytes);
+	}
+	buffer_copy_offset += no_bytes;
+	pending_bytes -= no_bytes;
+	--entry_count_remaining;
+
+	((response_t *)purex)->signature = RESPONSE_PROCESSED;
+	wmb();
+
+	do {
+		while ((total_bytes > 0) && (entry_count_remaining > 0)) {
+			*pkt = rsp_q->ring_ptr;
+			data = ((sts_cont_entry_t *)*pkt)->data;
+			data_sz = qla_sts_cont_data_size(ha);
+
+			if (((sts_cont_entry_t *)*pkt)->entry_type !=
+			    STATUS_CONT_TYPE) {
+				ql_log(ql_log_warn, vha, 0x507a,
+				       "Unexpected IOCB type, partial data 0x%x\n",
+				       buffer_copy_offset);
+				break;
+			}
+
+			qla_rsp_ring_advance(rsp_q);
+			no_bytes = (pending_bytes > data_sz) ?
+			    data_sz : pending_bytes;
+			if ((buffer_copy_offset + no_bytes) <= total_bytes) {
+				memcpy(((uint8_t *)fpin_pkt +
+				    buffer_copy_offset), data,
+				    no_bytes);
+				buffer_copy_offset += no_bytes;
+				pending_bytes -= no_bytes;
+				--entry_count_remaining;
+			} else {
+				ql_log(ql_log_warn, vha, 0x5044,
+				       "Attempt to copy more that we got, optimizing..%x\n",
+				       buffer_copy_offset);
+				memcpy(((uint8_t *)fpin_pkt +
+				    buffer_copy_offset), data,
+				    total_bytes - buffer_copy_offset);
+			}
+
+			((response_t *)*pkt)->signature = RESPONSE_PROCESSED;
+			wmb();
+		}
+
+		if (pending_bytes != 0 || entry_count_remaining != 0) {
+			ql_log(ql_log_fatal, vha, 0x508b,
+			       "Dropping partial FPIN, underrun bytes = 0x%x, entry cnts 0x%x\n",
+			       total_bytes, entry_count_remaining);
+			qla24xx_free_purex_item(item);
+			return NULL;
+		}
+	} while (entry_count_remaining > 0);
+	host_to_fcp_swap((uint8_t *)&item->iocb, total_bytes);
+	return item;
+}
+
 /**
  * qla2x00_async_event() - Process aynchronous events.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  * @mb: Mailbox registers (0 - 3)
  */
 void
@@ -630,13 +1358,20 @@ qla2x00_async_event(scsi_qla_host_t *vha, struct rsp_que *rsp, uint16_t *mb)
 	unsigned long	flags;
 	fc_port_t	*fcport = NULL;
 
+	if (!vha->hw->flags.fw_started) {
+		ql_log(ql_log_warn, vha, 0x50ff,
+		    "Dropping AEN - %04x %04x %04x %04x.\n",
+		    mb[0], mb[1], mb[2], mb[3]);
+		return;
+	}
+
 	/* Setup to process RIO completion. */
 	handle_cnt = 0;
 	if (IS_CNA_CAPABLE(ha))
 		goto skip_rio;
 	switch (mb[0]) {
 	case MBA_SCSI_COMPLETION:
-		handles[0] = le32_to_cpu((uint32_t)((mb[2] << 16) | mb[1]));
+		handles[0] = make_handle(mb[2], mb[1]);
 		handle_cnt = 1;
 		break;
 	case MBA_CMPLT_1_16BIT:
@@ -675,10 +1410,9 @@ qla2x00_async_event(scsi_qla_host_t *vha, struct rsp_que *rsp, uint16_t *mb)
 		mb[0] = MBA_SCSI_COMPLETION;
 		break;
 	case MBA_CMPLT_2_32BIT:
-		handles[0] = le32_to_cpu((uint32_t)((mb[2] << 16) | mb[1]));
-		handles[1] = le32_to_cpu(
-		    ((uint32_t)(RD_MAILBOX_REG(ha, reg, 7) << 16)) |
-		    RD_MAILBOX_REG(ha, reg, 6));
+		handles[0] = make_handle(mb[2], mb[1]);
+		handles[1] = make_handle(RD_MAILBOX_REG(ha, reg, 7),
+					 RD_MAILBOX_REG(ha, reg, 6));
 		handle_cnt = 2;
 		mb[0] = MBA_SCSI_COMPLETION;
 		break;
@@ -704,13 +1438,31 @@ skip_rio:
 		break;
 
 	case MBA_SYSTEM_ERR:		/* System Error */
-		mbx = (IS_QLA81XX(ha) || IS_QLA83XX(ha) || IS_QLA27XX(ha)) ?
-			RD_REG_WORD(&reg24->mailbox7) : 0;
-		ql_log(ql_log_warn, vha, 0x5003,
-		    "ISP System Error - mbx1=%xh mbx2=%xh mbx3=%xh "
-		    "mbx7=%xh.\n", mb[1], mb[2], mb[3], mbx);
+		mbx = 0;
 
-		ha->isp_ops->fw_dump(vha, 1);
+		vha->hw_err_cnt++;
+
+		if (IS_QLA81XX(ha) || IS_QLA83XX(ha) ||
+		    IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+			u16 m[4];
+
+			m[0] = rd_reg_word(&reg24->mailbox4);
+			m[1] = rd_reg_word(&reg24->mailbox5);
+			m[2] = rd_reg_word(&reg24->mailbox6);
+			mbx = m[3] = rd_reg_word(&reg24->mailbox7);
+
+			ql_log(ql_log_warn, vha, 0x5003,
+			    "ISP System Error - mbx1=%xh mbx2=%xh mbx3=%xh mbx4=%xh mbx5=%xh mbx6=%xh mbx7=%xh.\n",
+			    mb[1], mb[2], mb[3], m[0], m[1], m[2], m[3]);
+		} else
+			ql_log(ql_log_warn, vha, 0x5003,
+			    "ISP System Error - mbx1=%xh mbx2=%xh mbx3=%xh.\n ",
+			    mb[1], mb[2], mb[3]);
+
+		if ((IS_QLA27XX(ha) || IS_QLA28XX(ha)) &&
+		    rd_reg_word(&reg24->mailbox7) & BIT_8)
+			ha->isp_ops->mpi_fw_dump(vha, 1);
+		ha->isp_ops->fw_dump(vha);
 		ha->flags.fw_init_done = 0;
 		QLA_FW_STOPPED(ha);
 
@@ -743,12 +1495,16 @@ skip_rio:
 		ql_log(ql_log_warn, vha, 0x5006,
 		    "ISP Request Transfer Error (%x).\n",  mb[1]);
 
+		vha->hw_err_cnt++;
+
 		set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 		break;
 
 	case MBA_RSP_TRANSFER_ERR:	/* Response Transfer Error */
 		ql_log(ql_log_warn, vha, 0x5007,
 		    "ISP Response Transfer Error (%x).\n", mb[1]);
+
+		vha->hw_err_cnt++;
 
 		set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 		break;
@@ -761,13 +1517,11 @@ skip_rio:
 	case MBA_LOOP_INIT_ERR:
 		ql_log(ql_log_warn, vha, 0x5090,
 		    "LOOP INIT ERROR (%x).\n", mb[1]);
-		ha->isp_ops->fw_dump(vha, 1);
 		set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 		break;
 
 	case MBA_LIP_OCCURRED:		/* Loop Initialization Procedure */
 		ha->flags.lip_ae = 1;
-		ha->flags.n2n_ae = 0;
 
 		ql_dbg(ql_dbg_async, vha, 0x5009,
 		    "LIP occurred (%x).\n", mb[1]);
@@ -775,7 +1529,7 @@ skip_rio:
 		if (atomic_read(&vha->loop_state) != LOOP_DOWN) {
 			atomic_set(&vha->loop_state, LOOP_DOWN);
 			atomic_set(&vha->loop_down_timer, LOOP_DOWN_TIME);
-			qla2x00_mark_all_devices_lost(vha, 1);
+			qla2x00_mark_all_devices_lost(vha);
 		}
 
 		if (vha->vp_idx) {
@@ -800,24 +1554,31 @@ skip_rio:
 		    "LOOP UP detected (%s Gbps).\n",
 		    qla2x00_get_link_speed_str(ha, ha->link_data_rate));
 
+		if (IS_QLA83XX(ha) || IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+			if (mb[2] & BIT_0)
+				ql_log(ql_log_info, vha, 0x11a0,
+				    "FEC=enabled (link up).\n");
+		}
+
 		vha->flags.management_server_logged_in = 0;
 		qla2x00_post_aen_work(vha, FCH_EVT_LINKUP, ha->link_data_rate);
 
-		if (AUTO_DETECT_SFP_SUPPORT(vha)) {
-			set_bit(DETECT_SFP_CHANGE, &vha->dpc_flags);
-			qla2xxx_wake_dpc(vha);
+		if (vha->link_down_time < vha->hw->port_down_retry_count) {
+			vha->short_link_down_cnt++;
+			vha->link_down_time = QLA2XX_MAX_LINK_DOWN_TIME;
 		}
+
 		break;
 
 	case MBA_LOOP_DOWN:		/* Loop Down Event */
 		SAVE_TOPO(ha);
-		ha->flags.n2n_ae = 0;
 		ha->flags.lip_ae = 0;
 		ha->current_topology = 0;
+		vha->link_down_time = 0;
 
 		mbx = (IS_QLA81XX(ha) || IS_QLA8031(ha))
-			? RD_REG_WORD(&reg24->mailbox4) : 0;
-		mbx = (IS_P3P_TYPE(ha)) ? RD_REG_WORD(&reg82->mailbox_out[4])
+			? rd_reg_word(&reg24->mailbox4) : 0;
+		mbx = (IS_P3P_TYPE(ha)) ? rd_reg_word(&reg82->mailbox_out[4])
 			: mbx;
 		ql_log(ql_log_info, vha, 0x500b,
 		    "LOOP DOWN detected (%x %x %x %x).\n",
@@ -832,9 +1593,9 @@ skip_rio:
 			 * Restore for Physical Port only
 			 */
 			if (!vha->vp_idx) {
-				if (ha->flags.fawwpn_enabled) {
-					void *wwpn = ha->init_cb->port_name;
-					memcpy(vha->port_name, wwpn, WWN_SIZE);
+				if (ha->flags.fawwpn_enabled &&
+				    (ha->current_topology == ISP_CFG_F)) {
+					memcpy(vha->port_name, ha->port_name, WWN_SIZE);
 					fc_host_port_name(vha->host) =
 					    wwn_to_u64(vha->port_name);
 					ql_dbg(ql_dbg_init + ql_dbg_verbose,
@@ -847,7 +1608,7 @@ skip_rio:
 			}
 
 			vha->device_flags |= DFLG_NO_CABLE;
-			qla2x00_mark_all_devices_lost(vha, 1);
+			qla2x00_mark_all_devices_lost(vha);
 		}
 
 		if (vha->vp_idx) {
@@ -867,7 +1628,7 @@ skip_rio:
 		if (atomic_read(&vha->loop_state) != LOOP_DOWN) {
 			atomic_set(&vha->loop_state, LOOP_DOWN);
 			atomic_set(&vha->loop_down_timer, LOOP_DOWN_TIME);
-			qla2x00_mark_all_devices_lost(vha, 1);
+			qla2x00_mark_all_devices_lost(vha);
 		}
 
 		if (vha->vp_idx) {
@@ -885,7 +1646,6 @@ skip_rio:
 	/* case MBA_DCBX_COMPLETE: */
 	case MBA_POINT_TO_POINT:	/* Point-to-Point */
 		ha->flags.lip_ae = 0;
-		ha->flags.n2n_ae = 1;
 
 		if (IS_QLA2100(ha))
 			break;
@@ -910,7 +1670,8 @@ skip_rio:
 			if (!atomic_read(&vha->loop_down_timer))
 				atomic_set(&vha->loop_down_timer,
 				    LOOP_DOWN_TIME);
-			qla2x00_mark_all_devices_lost(vha, 1);
+			if (!N2N_TOPO(ha))
+				qla2x00_mark_all_devices_lost(vha);
 		}
 
 		if (vha->vp_idx) {
@@ -939,7 +1700,7 @@ skip_rio:
 			if (!atomic_read(&vha->loop_down_timer))
 				atomic_set(&vha->loop_down_timer,
 				    LOOP_DOWN_TIME);
-			qla2x00_mark_all_devices_lost(vha, 1);
+			qla2x00_mark_all_devices_lost(vha);
 		}
 
 		if (vha->vp_idx) {
@@ -1000,15 +1761,29 @@ skip_rio:
 
 			/* Port logout */
 			fcport = qla2x00_find_fcport_by_loopid(vha, mb[1]);
-			if (!fcport)
+			if (!fcport) {
+				ql_dbg(ql_dbg_async, vha, 0x5011,
+					"Could not find fcport:%04x %04x %04x\n",
+					mb[1], mb[2], mb[3]);
 				break;
-			if (atomic_read(&fcport->state) != FCS_ONLINE)
+			}
+
+			if (atomic_read(&fcport->state) != FCS_ONLINE) {
+				ql_dbg(ql_dbg_async, vha, 0x5012,
+					"Port state is not online State:0x%x \n",
+					atomic_read(&fcport->state));
+				ql_dbg(ql_dbg_async, vha, 0x5012,
+					"Scheduling session for deletion \n");
+				fcport->logout_on_delete = 0;
+				qlt_schedule_sess_for_deletion(fcport);
 				break;
+			}
+
 			ql_dbg(ql_dbg_async, vha, 0x508a,
 			    "Marking port lost loopid=%04x portid=%06x.\n",
 			    fcport->loop_id, fcport->d_id.b24);
+
 			if (qla_ini_mode_enabled(vha)) {
-				qla2x00_mark_device_lost(fcport->vha, fcport, 1, 1);
 				fcport->logout_on_delete = 0;
 				qlt_schedule_sess_for_deletion(fcport);
 			}
@@ -1020,14 +1795,14 @@ global_port_update:
 				atomic_set(&vha->loop_down_timer,
 				    LOOP_DOWN_TIME);
 				vha->device_flags |= DFLG_NO_CABLE;
-				qla2x00_mark_all_devices_lost(vha, 1);
+				qla2x00_mark_all_devices_lost(vha);
 			}
 
 			if (vha->vp_idx) {
 				atomic_set(&vha->vp_state, VP_FAILED);
 				fc_vport_set_state(vha->fc_vport,
 				    FC_VPORT_FAILED);
-				qla2x00_mark_all_devices_lost(vha, 1);
+				qla2x00_mark_all_devices_lost(vha);
 			}
 
 			vha->flags.management_server_logged_in = 0;
@@ -1047,8 +1822,6 @@ global_port_update:
 			ql_dbg(ql_dbg_async, vha, 0x5011,
 			    "Asynchronous PORT UPDATE ignored %04x/%04x/%04x.\n",
 			    mb[1], mb[2], mb[3]);
-
-			qlt_async_event(mb[0], vha, mb);
 			break;
 		}
 
@@ -1065,8 +1838,6 @@ global_port_update:
 		set_bit(LOOP_RESYNC_NEEDED, &vha->dpc_flags);
 		set_bit(LOCAL_LOOP_UPDATE, &vha->dpc_flags);
 		set_bit(VP_CONFIG_OK, &vha->vp_flags);
-
-		qlt_async_event(mb[0], vha, mb);
 		break;
 
 	case MBA_RSCN_UPDATE:		/* State Change Registration */
@@ -1077,9 +1848,9 @@ global_port_update:
 		if (ha->flags.npiv_supported && vha->vp_idx != (mb[3] & 0xff))
 			break;
 
-		ql_dbg(ql_dbg_async, vha, 0x5013,
-		    "RSCN database changed -- %04x %04x %04x.\n",
-		    mb[1], mb[2], mb[3]);
+		ql_log(ql_log_warn, vha, 0x5013,
+		       "RSCN database changed -- %04x %04x %04x.\n",
+		       mb[1], mb[2], mb[3]);
 
 		rscn_entry = ((mb[1] & 0xff) << 16) | mb[2];
 		host_pid = (vha->d_id.b.domain << 16) | (vha->d_id.b.area << 8)
@@ -1104,11 +1875,23 @@ global_port_update:
 			struct event_arg ea;
 
 			memset(&ea, 0, sizeof(ea));
-			ea.event = FCME_RSCN;
 			ea.id.b24 = rscn_entry;
 			ea.id.b.rsvd_1 = rscn_entry >> 24;
-			qla2x00_fcport_event_handler(vha, &ea);
+			qla2x00_handle_rscn(vha, &ea);
 			qla2x00_post_aen_work(vha, FCH_EVT_RSCN, rscn_entry);
+		}
+		break;
+	case MBA_CONGN_NOTI_RECV:
+		if (!ha->flags.scm_enabled ||
+		    mb[1] != QLA_CON_PRIMITIVE_RECEIVED)
+			break;
+
+		if (mb[2] == QLA_CONGESTION_ARB_WARNING) {
+			ql_dbg(ql_dbg_async, vha, 0x509b,
+			       "Congestion Warning %04x %04x.\n", mb[1], mb[2]);
+		} else if (mb[2] == QLA_CONGESTION_ARB_ALARM) {
+			ql_log(ql_log_warn, vha, 0x509b,
+			       "Congestion Alarm %04x %04x.\n", mb[1], mb[2]);
 		}
 		break;
 	/* case MBA_RIO_RESPONSE: */
@@ -1126,6 +1909,7 @@ global_port_update:
 		ql_dbg(ql_dbg_async, vha, 0x5016,
 		    "Discard RND Frame -- %04x %04x %04x.\n",
 		    mb[1], mb[2], mb[3]);
+		vha->interface_err_cnt++;
 		break;
 
 	case MBA_TRACE_NOTIFICATION:
@@ -1188,7 +1972,7 @@ global_port_update:
 		break;
 	case MBA_IDC_NOTIFY:
 		if (IS_QLA8031(vha->hw) || IS_QLA8044(ha)) {
-			mb[4] = RD_REG_WORD(&reg24->mailbox4);
+			mb[4] = rd_reg_word(&reg24->mailbox4);
 			if (((mb[2] & 0x7fff) == MBC_PORT_RESET ||
 			    (mb[2] & 0x7fff) == MBC_SET_PORT_CONFIG) &&
 			    (mb[4] & INTERNAL_LOOPBACK_MASK) != 0) {
@@ -1202,11 +1986,11 @@ global_port_update:
 				qla2xxx_wake_dpc(vha);
 			}
 		}
-		/* fall through */
+		fallthrough;
 	case MBA_IDC_COMPLETE:
 		if (ha->notify_lb_portup_comp && !vha->vp_idx)
 			complete(&ha->lb_portup_comp);
-		/* Fallthru */
+		fallthrough;
 	case MBA_IDC_TIME_EXT:
 		if (IS_QLA81XX(vha->hw) || IS_QLA8031(vha->hw) ||
 		    IS_QLA8044(ha))
@@ -1214,32 +1998,72 @@ global_port_update:
 		break;
 
 	case MBA_IDC_AEN:
-		mb[4] = RD_REG_WORD(&reg24->mailbox4);
-		mb[5] = RD_REG_WORD(&reg24->mailbox5);
-		mb[6] = RD_REG_WORD(&reg24->mailbox6);
-		mb[7] = RD_REG_WORD(&reg24->mailbox7);
-		qla83xx_handle_8200_aen(vha, mb);
+		if (IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+			vha->hw_err_cnt++;
+			qla27xx_handle_8200_aen(vha, mb);
+		} else if (IS_QLA83XX(ha)) {
+			mb[4] = rd_reg_word(&reg24->mailbox4);
+			mb[5] = rd_reg_word(&reg24->mailbox5);
+			mb[6] = rd_reg_word(&reg24->mailbox6);
+			mb[7] = rd_reg_word(&reg24->mailbox7);
+			qla83xx_handle_8200_aen(vha, mb);
+		} else {
+			ql_dbg(ql_dbg_async, vha, 0x5052,
+			    "skip Heartbeat processing mb0-3=[0x%04x] [0x%04x] [0x%04x] [0x%04x]\n",
+			    mb[0], mb[1], mb[2], mb[3]);
+		}
 		break;
 
 	case MBA_DPORT_DIAGNOSTICS:
+		if ((mb[1] & 0xF) == AEN_DONE_DIAG_TEST_WITH_NOERR ||
+		    (mb[1] & 0xF) == AEN_DONE_DIAG_TEST_WITH_ERR)
+			vha->dport_status &= ~DPORT_DIAG_IN_PROGRESS;
 		ql_dbg(ql_dbg_async, vha, 0x5052,
-		    "D-Port Diagnostics: %04x result=%s\n",
-		    mb[0],
-		    mb[1] == 0 ? "start" :
-		    mb[1] == 1 ? "done (pass)" :
-		    mb[1] == 2 ? "done (error)" : "other");
+		    "D-Port Diagnostics: %04x %04x %04x %04x\n",
+		    mb[0], mb[1], mb[2], mb[3]);
+		memcpy(vha->dport_data, mb, sizeof(vha->dport_data));
+		if (IS_QLA83XX(ha) || IS_QLA27XX(ha) || IS_QLA28XX(ha)) {
+			static char *results[] = {
+			    "start", "done(pass)", "done(error)", "undefined" };
+			static char *types[] = {
+			    "none", "dynamic", "static", "other" };
+			uint result = mb[1] >> 0 & 0x3;
+			uint type = mb[1] >> 6 & 0x3;
+			uint sw = mb[1] >> 15 & 0x1;
+			ql_dbg(ql_dbg_async, vha, 0x5052,
+			    "D-Port Diagnostics: result=%s type=%s [sw=%u]\n",
+			    results[result], types[type], sw);
+			if (result == 2) {
+				static char *reasons[] = {
+				    "reserved", "unexpected reject",
+				    "unexpected phase", "retry exceeded",
+				    "timed out", "not supported",
+				    "user stopped" };
+				uint reason = mb[2] >> 0 & 0xf;
+				uint phase = mb[2] >> 12 & 0xf;
+				ql_dbg(ql_dbg_async, vha, 0x5052,
+				    "D-Port Diagnostics: reason=%s phase=%u \n",
+				    reason < 7 ? reasons[reason] : "other",
+				    phase >> 1);
+			}
+		}
 		break;
 
 	case MBA_TEMPERATURE_ALERT:
+		if (IS_QLA27XX(ha) || IS_QLA28XX(ha))
+			display_Laser_info(vha, mb[1], mb[2], mb[3]);
 		ql_dbg(ql_dbg_async, vha, 0x505e,
 		    "TEMPERATURE ALERT: %04x %04x %04x\n", mb[1], mb[2], mb[3]);
-		if (mb[1] == 0x12)
-			schedule_work(&ha->board_disable);
 		break;
 
 	case MBA_TRANS_INSERT:
 		ql_dbg(ql_dbg_async, vha, 0x5091,
 		    "Transceiver Insertion: %04x\n", mb[1]);
+		set_bit(DETECT_SFP_CHANGE, &vha->dpc_flags);
+		break;
+
+	case MBA_TRANS_REMOVE:
+		ql_dbg(ql_dbg_async, vha, 0x5091, "Transceiver Removal\n");
 		break;
 
 	default:
@@ -1256,7 +2080,8 @@ global_port_update:
 
 /**
  * qla2x00_process_completed_request() - Process a Fast Post response.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @req: request queue
  * @index: SRB index
  */
 void
@@ -1295,41 +2120,59 @@ qla2x00_process_completed_request(struct scsi_qla_host *vha,
 	}
 }
 
-srb_t *
-qla2x00_get_sp_from_handle(scsi_qla_host_t *vha, const char *func,
-    struct req_que *req, void *iocb)
+static srb_t *
+qla_get_sp_from_handle(scsi_qla_host_t *vha, const char *func,
+		       struct req_que *req, void *iocb, u16 *ret_index)
 {
 	struct qla_hw_data *ha = vha->hw;
 	sts_entry_t *pkt = iocb;
-	srb_t *sp = NULL;
+	srb_t *sp;
 	uint16_t index;
+
+	if (pkt->handle == QLA_SKIP_HANDLE)
+		return NULL;
 
 	index = LSW(pkt->handle);
 	if (index >= req->num_outstanding_cmds) {
 		ql_log(ql_log_warn, vha, 0x5031,
-			   "Invalid command index (%x) type %8ph.\n",
-			   index, iocb);
+			   "%s: Invalid command index (%x) type %8ph.\n",
+			   func, index, iocb);
 		if (IS_P3P_TYPE(ha))
 			set_bit(FCOE_CTX_RESET_NEEDED, &vha->dpc_flags);
 		else
 			set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
-		goto done;
+		return NULL;
 	}
 	sp = req->outstanding_cmds[index];
 	if (!sp) {
 		ql_log(ql_log_warn, vha, 0x5032,
-		    "Invalid completion handle (%x) -- timed-out.\n", index);
-		return sp;
+			"%s: Invalid completion handle (%x) -- timed-out.\n",
+			func, index);
+		return NULL;
 	}
 	if (sp->handle != index) {
 		ql_log(ql_log_warn, vha, 0x5033,
-		    "SRB handle (%x) mismatch %x.\n", sp->handle, index);
+			"%s: SRB handle (%x) mismatch %x.\n", func,
+			sp->handle, index);
 		return NULL;
 	}
 
-	req->outstanding_cmds[index] = NULL;
+	*ret_index = index;
+	qla_put_fw_resources(sp->qpair, &sp->iores);
+	return sp;
+}
 
-done:
+srb_t *
+qla2x00_get_sp_from_handle(scsi_qla_host_t *vha, const char *func,
+			   struct req_que *req, void *iocb)
+{
+	uint16_t index;
+	srb_t *sp;
+
+	sp = qla_get_sp_from_handle(vha, func, req, iocb, &index);
+	if (sp)
+		req->outstanding_cmds[index] = NULL;
+
 	return sp;
 }
 
@@ -1368,7 +2211,7 @@ qla2x00_mbx_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
 		    le16_to_cpu(mbx->status_flags));
 
 		ql_dump_buffer(ql_dbg_async + ql_dbg_buffer, vha, 0x5029,
-		    (uint8_t *)mbx, sizeof(*mbx));
+		    mbx, sizeof(*mbx));
 
 		goto logio_done;
 	}
@@ -1424,6 +2267,7 @@ qla24xx_mbx_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
     struct mbx_24xx_entry *pkt)
 {
 	const char func[] = "MBX-IOCB2";
+	struct qla_hw_data *ha = vha->hw;
 	srb_t *sp;
 	struct srb_iocb *si;
 	u16 sz, i;
@@ -1433,11 +2277,23 @@ qla24xx_mbx_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
 	if (!sp)
 		return;
 
+	if (sp->type == SRB_SCSI_CMD ||
+	    sp->type == SRB_NVME_CMD ||
+	    sp->type == SRB_TM_CMD) {
+		ql_log(ql_log_warn, vha, 0x509d,
+			"Inconsistent event entry type %d\n", sp->type);
+		if (IS_P3P_TYPE(ha))
+			set_bit(FCOE_CTX_RESET_NEEDED, &vha->dpc_flags);
+		else
+			set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
+		return;
+	}
+
 	si = &sp->u.iocb_cmd;
 	sz = min(ARRAY_SIZE(pkt->mb), ARRAY_SIZE(sp->u.iocb_cmd.u.mbx.in_mb));
 
 	for (i = 0; i < sz; i++)
-		si->u.mbx.in_mb[i] = le16_to_cpu(pkt->mb[i]);
+		si->u.mbx.in_mb[i] = pkt->mb[i];
 
 	res = (si->u.mbx.in_mb[0] & MBS_MASK);
 
@@ -1498,7 +2354,7 @@ qla2x00_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 		    if (comp_status == CS_DATA_UNDERRUN) {
 			    res = DID_OK << 16;
 			    bsg_reply->reply_payload_rcv_len =
-				le16_to_cpu(((sts_entry_t *)pkt)->rsp_info_len);
+				le16_to_cpu(pkt->rsp_info_len);
 
 			    ql_log(ql_log_warn, vha, 0x5048,
 				"CT pass-through-%s error comp_status=0x%x total_byte=0x%x.\n",
@@ -1512,7 +2368,7 @@ qla2x00_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 			    bsg_reply->reply_payload_rcv_len = 0;
 		    }
 		    ql_dump_buffer(ql_dbg_async + ql_dbg_buffer, vha, 0x5035,
-			(uint8_t *)pkt, sizeof(*pkt));
+			pkt, sizeof(*pkt));
 	    } else {
 		    res = DID_OK << 16;
 		    bsg_reply->reply_payload_rcv_len =
@@ -1535,9 +2391,27 @@ qla2x00_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 }
 
 static void
-qla24xx_els_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
-    struct sts_entry_24xx *pkt, int iocb_type)
+qla24xx_els_ct_entry(scsi_qla_host_t *v, struct req_que *req,
+		     void *pkt, int iocb_type)
 {
+	/*
+	 * els_sts_entry_24xx_ext (29xx) overlays els_sts_entry_24xx for every
+	 * field touched in this completion handler: comp_status (offset 8),
+	 * total_byte_count (32), error_subcode_1 (36), error_subcode_2 (40),
+	 * d_id[]/s_id[] (24..29), control_flags (30) all sit at byte-identical
+	 * offsets in both layouts (only vp_index/sof_type at offset 14-15 are
+	 * bit-packed differently, and that field is write-only on the issue
+	 * path -- we never read it here). All reads in this function are
+	 * therefore stride-agnostic and go through a single struct
+	 * els_sts_entry_24xx * view; the trailing reserved_4[] of the extended
+	 * layout is irrelevant on completion.
+	 *
+	 * Likewise els_entry_24xx_ext overlays els_entry_24xx through
+	 * control_flags (offset 30), so the SRB_ELS_CMD_HST_NOLOGIN ctl_flags
+	 * read below also goes through the 24xx view.
+	 */
+	struct sts_entry_24xx *sts24 = pkt;
+	struct els_sts_entry_24xx *ese = (struct els_sts_entry_24xx *)pkt;
 	const char func[] = "ELS_CT_IOCB";
 	const char *type;
 	srb_t *sp;
@@ -1545,18 +2419,59 @@ qla24xx_els_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 	struct fc_bsg_reply *bsg_reply;
 	uint16_t comp_status;
 	uint32_t fw_status[3];
-	int res;
+	int res, logit = 1;
 	struct srb_iocb *els;
+	uint n;
+	scsi_qla_host_t *vha;
+	struct els_sts_entry_24xx *e = (struct els_sts_entry_24xx *)pkt;
 
-	sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
+	sp = qla2x00_get_sp_from_handle(v, func, req, pkt);
 	if (!sp)
 		return;
+	bsg_job = sp->u.bsg_job;
+	vha = sp->vha;
 
 	type = NULL;
+
+	comp_status = fw_status[0] = le16_to_cpu(sts24->comp_status);
+	fw_status[1] = le32_to_cpu(ese->error_subcode_1);
+	fw_status[2] = le32_to_cpu(ese->error_subcode_2);
+
 	switch (sp->type) {
 	case SRB_ELS_CMD_RPT:
 	case SRB_ELS_CMD_HST:
+		type = "rpt hst";
+		break;
+	case SRB_ELS_CMD_HST_NOLOGIN:
 		type = "els";
+		{
+			__le16 ctl_flags =
+				((struct els_entry_24xx *)pkt)->control_flags;
+			struct qla_bsg_auth_els_request *p =
+				(struct qla_bsg_auth_els_request *)bsg_job->request;
+
+			ql_dbg(ql_dbg_user, vha, 0x700f,
+			     "%s %s complete portid=%02x%02x%02x status %x xchg %x bsg ptr %p\n",
+			     __func__, sc_to_str(p->e.sub_cmd),
+			     e->d_id[2], e->d_id[1], e->d_id[0],
+			     comp_status, p->e.extra_rx_xchg_address, bsg_job);
+
+			if (!(le16_to_cpu(ctl_flags) & ECF_PAYLOAD_DESCR_MASK)) {
+				if (sp->remap.remapped) {
+					n = sg_copy_from_buffer(bsg_job->reply_payload.sg_list,
+						bsg_job->reply_payload.sg_cnt,
+						sp->remap.rsp.buf,
+						sp->remap.rsp.len);
+					ql_dbg(ql_dbg_user + ql_dbg_verbose, vha, 0x700e,
+					   "%s: SG copied %x of %x\n",
+					   __func__, n, sp->remap.rsp.len);
+				} else {
+					ql_dbg(ql_dbg_user, vha, 0x700f,
+					   "%s: NOT REMAPPED (error)...!!!\n",
+					   __func__);
+				}
+			}
+		}
 		break;
 	case SRB_CT_CMD:
 		type = "ct pass-through";
@@ -1586,34 +2501,75 @@ qla24xx_els_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 		return;
 	}
 
-	comp_status = fw_status[0] = le16_to_cpu(pkt->comp_status);
-	fw_status[1] = le16_to_cpu(((struct els_sts_entry_24xx*)pkt)->error_subcode_1);
-	fw_status[2] = le16_to_cpu(((struct els_sts_entry_24xx*)pkt)->error_subcode_2);
-
 	if (iocb_type == ELS_IOCB_TYPE) {
 		els = &sp->u.iocb_cmd;
-		els->u.els_plogi.fw_status[0] = fw_status[0];
-		els->u.els_plogi.fw_status[1] = fw_status[1];
-		els->u.els_plogi.fw_status[2] = fw_status[2];
-		els->u.els_plogi.comp_status = fw_status[0];
+		els->u.els_plogi.fw_status[0] = cpu_to_le32(fw_status[0]);
+		els->u.els_plogi.fw_status[1] = cpu_to_le32(fw_status[1]);
+		els->u.els_plogi.fw_status[2] = cpu_to_le32(fw_status[2]);
+		els->u.els_plogi.comp_status = cpu_to_le16(fw_status[0]);
 		if (comp_status == CS_COMPLETE) {
 			res =  DID_OK << 16;
 		} else {
 			if (comp_status == CS_DATA_UNDERRUN) {
 				res =  DID_OK << 16;
-				els->u.els_plogi.len =
-				le16_to_cpu(((struct els_sts_entry_24xx *)
-					pkt)->total_byte_count);
+				els->u.els_plogi.len = cpu_to_le16(
+					le32_to_cpu(ese->total_byte_count));
+
+				if (sp->remap.remapped &&
+				    ((u8 *)sp->remap.rsp.buf)[0] == ELS_LS_ACC) {
+					ql_dbg(ql_dbg_user, vha, 0x503f,
+					    "%s IOCB Done LS_ACC %02x%02x%02x -> %02x%02x%02x",
+					    __func__,
+					    e->s_id[0], e->s_id[2], e->s_id[1],
+					    e->d_id[2], e->d_id[1], e->d_id[0]);
+					logit = 0;
+				}
+
+			} else if (comp_status == CS_PORT_LOGGED_OUT) {
+				ql_dbg(ql_dbg_disc, vha, 0x911e,
+				       "%s %d schedule session deletion\n",
+				       __func__, __LINE__);
+
+				els->u.els_plogi.len = 0;
+				res = DID_IMM_RETRY << 16;
+				qlt_schedule_sess_for_deletion(sp->fcport);
 			} else {
 				els->u.els_plogi.len = 0;
 				res = DID_ERROR << 16;
 			}
+
+			if (sp->remap.remapped &&
+			    ((u8 *)sp->remap.rsp.buf)[0] == ELS_LS_RJT) {
+				if (logit) {
+					ql_dbg(ql_dbg_user, vha, 0x503f,
+					    "%s IOCB Done LS_RJT hdl=%x comp_status=0x%x\n",
+					    type, sp->handle, comp_status);
+
+					ql_dbg(ql_dbg_user, vha, 0x503f,
+					    "subcode 1=0x%x subcode 2=0x%x bytes=0x%x %02x%02x%02x -> %02x%02x%02x\n",
+					    fw_status[1], fw_status[2],
+					    le32_to_cpu(ese->total_byte_count),
+					    e->s_id[0], e->s_id[2], e->s_id[1],
+					    e->d_id[2], e->d_id[1], e->d_id[0]);
+				}
+				if (sp->fcport && sp->fcport->flags & FCF_FCSP_DEVICE &&
+				    sp->type == SRB_ELS_CMD_HST_NOLOGIN) {
+					ql_dbg(ql_dbg_edif, vha, 0x911e,
+					    "%s rcv reject. Sched delete\n", __func__);
+					qlt_schedule_sess_for_deletion(sp->fcport);
+				}
+			} else if (logit) {
+				ql_log(ql_log_info, vha, 0x503f,
+				    "%s IOCB Done hdl=%x comp_status=0x%x\n",
+				    type, sp->handle, comp_status);
+				ql_log(ql_log_info, vha, 0x503f,
+				    "subcode 1=0x%x subcode 2=0x%x bytes=0x%x %02x%02x%02x -> %02x%02x%02x\n",
+				    fw_status[1], fw_status[2],
+				    le32_to_cpu(ese->total_byte_count),
+				    e->s_id[0], e->s_id[2], e->s_id[1],
+				    e->d_id[2], e->d_id[1], e->d_id[0]);
+			}
 		}
-		ql_log(ql_log_info, vha, 0x503f,
-		    "ELS IOCB Done -%s error hdl=%x comp_status=0x%x error subcode 1=0x%x error subcode 2=0x%x total_byte=0x%x\n",
-		    type, sp->handle, comp_status, fw_status[1], fw_status[2],
-		    le16_to_cpu(((struct els_sts_entry_24xx *)
-			pkt)->total_byte_count));
 		goto els_ct_done;
 	}
 
@@ -1629,30 +2585,27 @@ qla24xx_els_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 		if (comp_status == CS_DATA_UNDERRUN) {
 			res = DID_OK << 16;
 			bsg_reply->reply_payload_rcv_len =
-			    le16_to_cpu(((struct els_sts_entry_24xx *)pkt)->total_byte_count);
+				le32_to_cpu(ese->total_byte_count);
 
 			ql_dbg(ql_dbg_user, vha, 0x503f,
 			    "ELS-CT pass-through-%s error hdl=%x comp_status-status=0x%x "
 			    "error subcode 1=0x%x error subcode 2=0x%x total_byte = 0x%x.\n",
 			    type, sp->handle, comp_status, fw_status[1], fw_status[2],
-			    le16_to_cpu(((struct els_sts_entry_24xx *)
-				pkt)->total_byte_count));
+			    le32_to_cpu(ese->total_byte_count));
 		} else {
 			ql_dbg(ql_dbg_user, vha, 0x5040,
 			    "ELS-CT pass-through-%s error hdl=%x comp_status-status=0x%x "
 			    "error subcode 1=0x%x error subcode 2=0x%x.\n",
 			    type, sp->handle, comp_status,
-			    le16_to_cpu(((struct els_sts_entry_24xx *)
-				pkt)->error_subcode_1),
-			    le16_to_cpu(((struct els_sts_entry_24xx *)
-				    pkt)->error_subcode_2));
+			    le32_to_cpu(ese->error_subcode_1),
+			    le32_to_cpu(ese->error_subcode_2));
 			res = DID_ERROR << 16;
 			bsg_reply->reply_payload_rcv_len = 0;
 		}
 		memcpy(bsg_job->reply + sizeof(struct fc_bsg_reply),
 		       fw_status, sizeof(fw_status));
 		ql_dump_buffer(ql_dbg_user + ql_dbg_buffer, vha, 0x5056,
-				(uint8_t *)pkt, sizeof(*pkt));
+		    pkt, sizeof(*pkt));
 	}
 	else {
 		res =  DID_OK << 16;
@@ -1665,8 +2618,7 @@ els_ct_done:
 }
 
 static void
-qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req,
-    struct logio_entry_24xx *logio)
+qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req, void *pkt)
 {
 	const char func[] = "LOGIO-IOCB";
 	const char *type;
@@ -1675,8 +2627,21 @@ qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req,
 	struct srb_iocb *lio;
 	uint16_t *data;
 	uint32_t iop[2];
+	int logit = 1;
+	struct qla_hw_data *ha = vha->hw;
+	/*
+	 * logio_entry_24xx_ext overlays logio_entry_24xx through
+	 * io_parameter[10]: comp_status, io_parameter[0..10] and
+	 * entry_status are at identical offsets and types in both layouts
+	 * (only vp_index width differs, and that field is write-only on
+	 * the issue path).  So all reads in this completion handler are
+	 * stride-agnostic and we read through a single struct
+	 * logio_entry_24xx * view; the trailing reserved_2[64] of the
+	 * extended layout is irrelevant here.
+	 */
+	struct logio_entry_24xx *logio = pkt;
 
-	sp = qla2x00_get_sp_from_handle(vha, func, req, logio);
+	sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
 	if (!sp)
 		return;
 
@@ -1696,23 +2661,34 @@ qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req,
 		    fcport->d_id.b.area, fcport->d_id.b.al_pa,
 		    logio->entry_status);
 		ql_dump_buffer(ql_dbg_async + ql_dbg_buffer, vha, 0x504d,
-		    (uint8_t *)logio, sizeof(*logio));
+		    pkt, qla_rsp_entry_size(ha));
 
 		goto logio_done;
 	}
 
 	if (le16_to_cpu(logio->comp_status) == CS_COMPLETE) {
-		ql_dbg(ql_dbg_async, fcport->vha, 0x5036,
-		    "Async-%s complete - %8phC hdl=%x portid=%02x%02x%02x "
-		    "iop0=%x.\n", type, fcport->port_name, sp->handle,
-		    fcport->d_id.b.domain,
-		    fcport->d_id.b.area, fcport->d_id.b.al_pa,
+		ql_dbg(ql_dbg_async, sp->vha, 0x5036,
+		    "Async-%s complete: handle=%x pid=%06x wwpn=%8phC iop0=%x\n",
+		    type, sp->handle, fcport->d_id.b24, fcport->port_name,
 		    le32_to_cpu(logio->io_parameter[0]));
 
-		vha->hw->exch_starvation = 0;
+		ha->exch_starvation = 0;
 		data[0] = MBS_COMMAND_COMPLETE;
+
+		if (sp->type == SRB_PRLI_CMD) {
+			lio->u.logio.iop[0] =
+			    le32_to_cpu(logio->io_parameter[0]);
+			lio->u.logio.iop[1] =
+			    le32_to_cpu(logio->io_parameter[1]);
+			goto logio_done;
+		}
+
 		if (sp->type != SRB_LOGIN_CMD)
 			goto logio_done;
+
+		lio->u.logio.iop[1] = le32_to_cpu(logio->io_parameter[5]);
+		if (le32_to_cpu(logio->io_parameter[5]) & LIO_COMM_FEAT_FCSP)
+			fcport->flags |= FCF_FCSP_DEVICE;
 
 		iop[0] = le32_to_cpu(logio->io_parameter[0]);
 		if (iop[0] & BIT_4) {
@@ -1735,15 +2711,18 @@ qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req,
 
 	iop[0] = le32_to_cpu(logio->io_parameter[0]);
 	iop[1] = le32_to_cpu(logio->io_parameter[1]);
+
 	lio->u.logio.iop[0] = iop[0];
 	lio->u.logio.iop[1] = iop[1];
 	switch (iop[0]) {
 	case LSC_SCODE_PORTID_USED:
 		data[0] = MBS_PORT_ID_USED;
 		data[1] = LSW(iop[1]);
+		logit = 0;
 		break;
 	case LSC_SCODE_NPORT_USED:
 		data[0] = MBS_LOOP_ID_USED;
+		logit = 0;
 		break;
 	case LSC_SCODE_CMD_FAILED:
 		if (iop[1] == 0x0606) {
@@ -1757,33 +2736,35 @@ qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req,
 		data[0] = MBS_COMMAND_ERROR;
 		break;
 	case LSC_SCODE_NOXCB:
-		vha->hw->exch_starvation++;
-		if (vha->hw->exch_starvation > 5) {
+		ha->exch_starvation++;
+		if (ha->exch_starvation > 5) {
 			ql_log(ql_log_warn, vha, 0xd046,
 			    "Exchange starvation. Resetting RISC\n");
 
-			vha->hw->exch_starvation = 0;
+			ha->exch_starvation = 0;
 
-			if (IS_P3P_TYPE(vha->hw))
+			if (IS_P3P_TYPE(ha))
 				set_bit(FCOE_CTX_RESET_NEEDED, &vha->dpc_flags);
 			else
 				set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 			qla2xxx_wake_dpc(vha);
 		}
-		/* fall through */
+		fallthrough;
 	default:
 		data[0] = MBS_COMMAND_ERROR;
 		break;
 	}
 
-	ql_dbg(ql_dbg_async, fcport->vha, 0x5037,
-	    "Async-%s failed - %8phC hdl=%x portid=%02x%02x%02x comp=%x "
-	    "iop0=%x iop1=%x.\n", type, fcport->port_name,
-		sp->handle, fcport->d_id.b.domain,
-	    fcport->d_id.b.area, fcport->d_id.b.al_pa,
-	    le16_to_cpu(logio->comp_status),
-	    le32_to_cpu(logio->io_parameter[0]),
-	    le32_to_cpu(logio->io_parameter[1]));
+	if (logit)
+		ql_log(ql_log_warn, sp->vha, 0x5037, "Async-%s failed: "
+		       "handle=%x pid=%06x wwpn=%8phC comp_status=%x iop0=%x iop1=%x\n",
+		       type, sp->handle, fcport->d_id.b24, fcport->port_name,
+		       le16_to_cpu(logio->comp_status), iop[0], iop[1]);
+	else
+		ql_dbg(ql_dbg_disc, sp->vha, 0x5037, "Async-%s failed: "
+		       "handle=%x pid=%06x wwpn=%8phC comp_status=%x iop0=%x iop1=%x\n",
+		       type, sp->handle, fcport->d_id.b24, fcport->port_name,
+		       le16_to_cpu(logio->comp_status), iop[0], iop[1]);
 
 logio_done:
 	sp->done(sp, 0);
@@ -1798,11 +2779,15 @@ qla24xx_tm_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
 	srb_t *sp;
 	struct srb_iocb *iocb;
 	struct sts_entry_24xx *sts = (struct sts_entry_24xx *)tsk;
+	struct qla_hw_data *ha = vha->hw;
+	u16 comp_status;
+	struct qla_sts_fwi2 sf;
 
 	sp = qla2x00_get_sp_from_handle(vha, func, req, tsk);
 	if (!sp)
 		return;
 
+	comp_status = le16_to_cpu(sts->comp_status);
 	iocb = &sp->u.iocb_cmd;
 	type = sp->name;
 	fcport = sp->fcport;
@@ -1816,55 +2801,85 @@ qla24xx_tm_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
 	} else if (sts->comp_status != cpu_to_le16(CS_COMPLETE)) {
 		ql_log(ql_log_warn, fcport->vha, 0x5039,
 		    "Async-%s error - hdl=%x completion status(%x).\n",
-		    type, sp->handle, sts->comp_status);
+		    type, sp->handle, comp_status);
 		iocb->u.tmf.data = QLA_FUNCTION_FAILED;
-	} else if ((le16_to_cpu(sts->scsi_status) &
-	    SS_RESPONSE_INFO_LEN_VALID)) {
-		if (le32_to_cpu(sts->rsp_data_len) < 4) {
-			ql_log(ql_log_warn, fcport->vha, 0x503b,
-			    "Async-%s error - hdl=%x not enough response(%d).\n",
-			    type, sp->handle, sts->rsp_data_len);
-		} else if (sts->data[3]) {
-			ql_log(ql_log_warn, fcport->vha, 0x503c,
-			    "Async-%s error - hdl=%x response(%x).\n",
-			    type, sp->handle, sts->data[3]);
-			iocb->u.tmf.data = QLA_FUNCTION_FAILED;
+	} else {
+		qla_sts_fwi2_extract(ha, tsk, &sf);
+		if (sf.scsi_status & SS_RESPONSE_INFO_LEN_VALID) {
+			if (sf.rsp_data_len < 4) {
+				ql_log(ql_log_warn, fcport->vha, 0x503b,
+				    "Async-%s error - hdl=%x not enough response(%d).\n",
+				    type, sp->handle, sf.rsp_data_len);
+			} else if (sf.data[3]) {
+				ql_log(ql_log_warn, fcport->vha, 0x503c,
+				    "Async-%s error - hdl=%x response(%x).\n",
+				    type, sp->handle, sf.data[3]);
+				iocb->u.tmf.data = QLA_FUNCTION_FAILED;
+			}
 		}
 	}
 
+	switch (comp_status) {
+	case CS_PORT_LOGGED_OUT:
+	case CS_PORT_CONFIG_CHG:
+	case CS_PORT_BUSY:
+	case CS_INCOMPLETE:
+	case CS_PORT_UNAVAILABLE:
+	case CS_RESET:
+		if (atomic_read(&fcport->state) == FCS_ONLINE) {
+			ql_dbg(ql_dbg_disc, fcport->vha, 0x3021,
+			       "-Port to be marked lost on fcport=%02x%02x%02x, current port state= %s comp_status %x.\n",
+			       fcport->d_id.b.domain, fcport->d_id.b.area,
+			       fcport->d_id.b.al_pa,
+			       port_state_str[FCS_ONLINE],
+			       comp_status);
+
+			qlt_schedule_sess_for_deletion(fcport);
+		}
+		break;
+
+	default:
+		break;
+	}
+
 	if (iocb->u.tmf.data != QLA_SUCCESS)
-		ql_dump_buffer(ql_dbg_async + ql_dbg_buffer, vha, 0x5055,
-		    (uint8_t *)sts, sizeof(*sts));
+		ql_dump_buffer(ql_dbg_async + ql_dbg_buffer, sp->vha, 0x5055,
+		    tsk, IS_QLA29XX(ha) ?
+		    sizeof(struct sts_entry_24xx_ext) : sizeof(*sts));
 
 	sp->done(sp, 0);
 }
 
-static void
-qla24xx_nvme_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
+static void qla24xx_nvme_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
+    void *tsk, srb_t *sp)
 {
-	const char func[] = "NVME-IOCB";
 	fc_port_t *fcport;
-	srb_t *sp;
 	struct srb_iocb *iocb;
 	struct sts_entry_24xx *sts = (struct sts_entry_24xx *)tsk;
+	struct sts_entry_24xx_ext *stsext = (struct sts_entry_24xx_ext *)tsk;
+	struct qla_hw_data *ha = vha->hw;
 	uint16_t        state_flags;
 	struct nvmefc_fcp_req *fd;
-	uint16_t        ret = 0;
-	struct srb_iocb *nvme;
-
-	sp = qla2x00_get_sp_from_handle(vha, func, req, tsk);
-	if (!sp)
-		return;
+	uint16_t        ret = QLA_SUCCESS;
+	__le16		comp_status = sts->comp_status;
+	int		logit = 0;
 
 	iocb = &sp->u.iocb_cmd;
 	fcport = sp->fcport;
-	iocb->u.nvme.comp_status = le16_to_cpu(sts->comp_status);
+	iocb->u.nvme.comp_status = comp_status;
 	state_flags  = le16_to_cpu(sts->state_flags);
 	fd = iocb->u.nvme.desc;
-	nvme = &sp->u.iocb_cmd;
 
-	if (unlikely(nvme->u.nvme.aen_op))
+	if (unlikely(iocb->u.nvme.aen_op))
 		atomic_dec(&sp->vha->hw->nvme_active_aen_cnt);
+	else
+		sp->qpair->cmd_completion_cnt++;
+
+	if (unlikely(comp_status != CS_COMPLETE))
+		logit = 1;
+
+	fd->transferred_length = fd->payload_length -
+	    le32_to_cpu(sts->residual_len);
 
 	/*
 	 * State flags: Bit 6 and 0.
@@ -1876,75 +2891,124 @@ qla24xx_nvme_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
 	 */
 	if (!(state_flags & (SF_FCP_RSP_DMA | SF_NVME_ERSP))) {
 		iocb->u.nvme.rsp_pyld_len = 0;
+	} else if ((state_flags & (SF_FCP_RSP_DMA | SF_NVME_ERSP)) ==
+			(SF_FCP_RSP_DMA | SF_NVME_ERSP)) {
+		/* Response already DMA'd to fd->rspaddr. */
+		iocb->u.nvme.rsp_pyld_len = sts->nvme_rsp_pyld_len;
 	} else if ((state_flags & SF_FCP_RSP_DMA)) {
-		iocb->u.nvme.rsp_pyld_len = le16_to_cpu(sts->nvme_rsp_pyld_len);
+		/*
+		 * Non-zero value in first 12 bytes of NVMe_RSP IU, treat this
+		 * as an error.
+		 */
+		iocb->u.nvme.rsp_pyld_len = 0;
+		fd->transferred_length = 0;
+		ql_dbg(ql_dbg_io, fcport->vha, 0x307a,
+			"Unexpected values in NVMe_RSP IU.\n");
+		logit = 1;
 	} else if (state_flags & SF_NVME_ERSP) {
 		uint32_t *inbuf, *outbuf;
 		uint16_t iter;
 
-		inbuf = (uint32_t *)&sts->nvme_ersp_data;
+		if (IS_QLA29XX(ha))
+			inbuf = (uint32_t *)stsext->u2.nvme_ersp_data;
+		else
+			inbuf = (uint32_t *)&sts->nvme_ersp_data;
 		outbuf = (uint32_t *)fd->rspaddr;
-		iocb->u.nvme.rsp_pyld_len = le16_to_cpu(sts->nvme_rsp_pyld_len);
-		iter = iocb->u.nvme.rsp_pyld_len >> 2;
+		iocb->u.nvme.rsp_pyld_len = sts->nvme_rsp_pyld_len;
+		if (unlikely(le16_to_cpu(iocb->u.nvme.rsp_pyld_len) >
+		    sizeof(struct nvme_fc_ersp_iu))) {
+			if (ql_mask_match(ql_dbg_io)) {
+				WARN_ONCE(1, "Unexpected response payload length %u.\n",
+				    iocb->u.nvme.rsp_pyld_len);
+				ql_log(ql_log_warn, fcport->vha, 0x5100,
+				    "Unexpected response payload length %u.\n",
+				    iocb->u.nvme.rsp_pyld_len);
+			}
+			iocb->u.nvme.rsp_pyld_len =
+				cpu_to_le16(sizeof(struct nvme_fc_ersp_iu));
+		}
+		iter = le16_to_cpu(iocb->u.nvme.rsp_pyld_len) >> 2;
 		for (; iter; iter--)
 			*outbuf++ = swab32(*inbuf++);
-	} else { /* unhandled case */
-	    ql_log(ql_log_warn, fcport->vha, 0x503a,
-		"NVME-%s error. Unhandled state_flags of %x\n",
-		sp->name, state_flags);
 	}
 
-	fd->transferred_length = fd->payload_length -
-	    le32_to_cpu(sts->residual_len);
+	if (state_flags & SF_NVME_ERSP) {
+		struct nvme_fc_ersp_iu *rsp_iu = fd->rspaddr;
+		u32 tgt_xfer_len;
+
+		tgt_xfer_len = be32_to_cpu(rsp_iu->xfrd_len);
+		if (fd->transferred_length != tgt_xfer_len) {
+			ql_log(ql_log_warn, fcport->vha, 0x3079,
+			       "Dropped frame(s) detected (sent/rcvd=%u/%u).\n",
+			       tgt_xfer_len, fd->transferred_length);
+			logit = 1;
+		} else if (le16_to_cpu(comp_status) == CS_DATA_UNDERRUN) {
+			/*
+			 * Do not log if this is just an underflow and there
+			 * is no data loss.
+			 */
+			logit = 0;
+		}
+	}
+
+	if (unlikely(logit))
+		ql_dbg(ql_dbg_io, fcport->vha, 0x5060,
+		   "NVME-%s ERR Handling - hdl=%x status(%x) tr_len:%x resid=%x  ox_id=%x\n",
+		   sp->name, sp->handle, comp_status,
+		   fd->transferred_length, le32_to_cpu(sts->residual_len),
+		   sts->ox_id);
 
 	/*
 	 * If transport error then Failure (HBA rejects request)
 	 * otherwise transport will handle.
 	 */
-	if (sts->entry_status) {
-		ql_log(ql_log_warn, fcport->vha, 0x5038,
-		    "NVME-%s error - hdl=%x entry-status(%x).\n",
-		    sp->name, sp->handle, sts->entry_status);
-		ret = QLA_FUNCTION_FAILED;
-	} else  {
-		switch (le16_to_cpu(sts->comp_status)) {
-			case CS_COMPLETE:
-				ret = 0;
-			break;
+	switch (le16_to_cpu(comp_status)) {
+	case CS_COMPLETE:
+		break;
 
-			case CS_ABORTED:
-			case CS_RESET:
-			case CS_PORT_UNAVAILABLE:
-			case CS_PORT_LOGGED_OUT:
-			case CS_PORT_BUSY:
-				ql_log(ql_log_warn, fcport->vha, 0x5060,
-				"NVME-%s ERR Handling - hdl=%x completion status(%x) resid=%x  ox_id=%x\n",
-				sp->name, sp->handle, sts->comp_status,
-				le32_to_cpu(sts->residual_len), sts->ox_id);
-				fd->transferred_length = fd->payload_length;
-				ret = QLA_ABORTED;
-			break;
+	case CS_RESET:
+	case CS_PORT_UNAVAILABLE:
+	case CS_PORT_LOGGED_OUT:
+		fcport->nvme_flag |= NVME_FLAG_RESETTING;
+		if (atomic_read(&fcport->state) == FCS_ONLINE) {
+			ql_dbg(ql_dbg_disc, fcport->vha, 0x3021,
+			       "Port to be marked lost on fcport=%06x, current "
+			       "port state= %s comp_status %x.\n",
+			       fcport->d_id.b24, port_state_str[FCS_ONLINE],
+			       comp_status);
 
-			default:
-				ql_log(ql_log_warn, fcport->vha, 0x5060,
-				"NVME-%s error - hdl=%x completion status(%x) resid=%x  ox_id=%x\n",
-				sp->name, sp->handle, sts->comp_status,
-				le32_to_cpu(sts->residual_len), sts->ox_id);
-				ret = QLA_FUNCTION_FAILED;
-				break;
+			qlt_schedule_sess_for_deletion(fcport);
 		}
+		fallthrough;
+	case CS_ABORTED:
+	case CS_PORT_BUSY:
+		fd->transferred_length = 0;
+		iocb->u.nvme.rsp_pyld_len = 0;
+		ret = QLA_ABORTED;
+		break;
+	case CS_DATA_UNDERRUN:
+		break;
+	default:
+		ret = QLA_FUNCTION_FAILED;
+		break;
 	}
 	sp->done(sp, ret);
 }
 
 static void qla_ctrlvp_completed(scsi_qla_host_t *vha, struct req_que *req,
-    struct vp_ctrl_entry_24xx *vce)
+				 void *pkt)
 {
 	const char func[] = "CTRLVP-IOCB";
+	/*
+	 * vp_ctrl_entry_24xx_ext overlays vp_ctrl_entry_24xx for all
+	 * fields read here (entry_status, comp_status, vp_idx_failed),
+	 * so the read goes through one struct vp_ctrl_entry_24xx * view.
+	 */
+	struct vp_ctrl_entry_24xx *vce = pkt;
 	srb_t *sp;
 	int rval = QLA_SUCCESS;
 
-	sp = qla2x00_get_sp_from_handle(vha, func, req, vce);
+	sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
 	if (!sp)
 		return;
 
@@ -1968,9 +3032,56 @@ static void qla_ctrlvp_completed(scsi_qla_host_t *vha, struct req_que *req,
 	sp->done(sp, rval);
 }
 
+/* Process a single response queue entry. */
+static void qla2x00_process_response_entry(struct scsi_qla_host *vha,
+					   struct rsp_que *rsp,
+					   sts_entry_t *pkt)
+{
+	sts21_entry_t *sts21_entry;
+	sts22_entry_t *sts22_entry;
+	uint16_t handle_cnt;
+	uint16_t cnt;
+
+	switch (pkt->entry_type) {
+	case STATUS_TYPE:
+		qla2x00_status_entry(vha, rsp, pkt);
+		break;
+	case STATUS_TYPE_21:
+		sts21_entry = (sts21_entry_t *)pkt;
+		handle_cnt = sts21_entry->handle_count;
+		for (cnt = 0; cnt < handle_cnt; cnt++)
+			qla2x00_process_completed_request(vha, rsp->req,
+						sts21_entry->handle[cnt]);
+		break;
+	case STATUS_TYPE_22:
+		sts22_entry = (sts22_entry_t *)pkt;
+		handle_cnt = sts22_entry->handle_count;
+		for (cnt = 0; cnt < handle_cnt; cnt++)
+			qla2x00_process_completed_request(vha, rsp->req,
+						sts22_entry->handle[cnt]);
+		break;
+	case STATUS_CONT_TYPE:
+		qla2x00_status_cont_entry(rsp, pkt,
+		    qla_sts_cont_data_size(rsp->hw));
+		break;
+	case MBX_IOCB_TYPE:
+		qla2x00_mbx_iocb_entry(vha, rsp->req, (struct mbx_entry *)pkt);
+		break;
+	case CT_IOCB_TYPE:
+		qla2x00_ct_entry(vha, rsp->req, pkt, CT_IOCB_TYPE);
+		break;
+	default:
+		/* Type Not Supported. */
+		ql_log(ql_log_warn, vha, 0x504a,
+		       "Received unknown response pkt type %x entry status=%x.\n",
+		       pkt->entry_type, pkt->entry_status);
+		break;
+	}
+}
+
 /**
  * qla2x00_process_response_queue() - Process response queue entries.
- * @ha: SCSI driver HA context
+ * @rsp: response queue
  */
 void
 qla2x00_process_response_queue(struct rsp_que *rsp)
@@ -1979,8 +3090,6 @@ qla2x00_process_response_queue(struct rsp_que *rsp)
 	struct qla_hw_data *ha = rsp->hw;
 	struct device_reg_2xxx __iomem *reg = &ha->iobase->isp;
 	sts_entry_t	*pkt;
-	uint16_t        handle_cnt;
-	uint16_t        cnt;
 
 	vha = pci_get_drvdata(ha->pdev);
 
@@ -1990,13 +3099,7 @@ qla2x00_process_response_queue(struct rsp_que *rsp)
 	while (rsp->ring_ptr->signature != RESPONSE_PROCESSED) {
 		pkt = (sts_entry_t *)rsp->ring_ptr;
 
-		rsp->ring_index++;
-		if (rsp->ring_index == rsp->length) {
-			rsp->ring_index = 0;
-			rsp->ring_ptr = rsp->ring;
-		} else {
-			rsp->ring_ptr++;
-		}
+		qla_rsp_ring_advance(rsp);
 
 		if (pkt->entry_status != 0) {
 			qla2x00_error_entry(vha, rsp, pkt);
@@ -2005,48 +3108,13 @@ qla2x00_process_response_queue(struct rsp_que *rsp)
 			continue;
 		}
 
-		switch (pkt->entry_type) {
-		case STATUS_TYPE:
-			qla2x00_status_entry(vha, rsp, pkt);
-			break;
-		case STATUS_TYPE_21:
-			handle_cnt = ((sts21_entry_t *)pkt)->handle_count;
-			for (cnt = 0; cnt < handle_cnt; cnt++) {
-				qla2x00_process_completed_request(vha, rsp->req,
-				    ((sts21_entry_t *)pkt)->handle[cnt]);
-			}
-			break;
-		case STATUS_TYPE_22:
-			handle_cnt = ((sts22_entry_t *)pkt)->handle_count;
-			for (cnt = 0; cnt < handle_cnt; cnt++) {
-				qla2x00_process_completed_request(vha, rsp->req,
-				    ((sts22_entry_t *)pkt)->handle[cnt]);
-			}
-			break;
-		case STATUS_CONT_TYPE:
-			qla2x00_status_cont_entry(rsp, (sts_cont_entry_t *)pkt);
-			break;
-		case MBX_IOCB_TYPE:
-			qla2x00_mbx_iocb_entry(vha, rsp->req,
-			    (struct mbx_entry *)pkt);
-			break;
-		case CT_IOCB_TYPE:
-			qla2x00_ct_entry(vha, rsp->req, pkt, CT_IOCB_TYPE);
-			break;
-		default:
-			/* Type Not Supported. */
-			ql_log(ql_log_warn, vha, 0x504a,
-			    "Received unknown response pkt type %x "
-			    "entry status=%x.\n",
-			    pkt->entry_type, pkt->entry_status);
-			break;
-		}
+		qla2x00_process_response_entry(vha, rsp, pkt);
 		((response_t *)pkt)->signature = RESPONSE_PROCESSED;
 		wmb();
 	}
 
 	/* Adjust ring index */
-	WRT_REG_WORD(ISP_RSP_Q_OUT(ha, reg), rsp->ring_index);
+	wrt_reg_word(ISP_RSP_Q_OUT(ha, reg), rsp->ring_index);
 }
 
 static inline void
@@ -2088,12 +3156,6 @@ qla2x00_handle_sense(srb_t *sp, uint8_t *sense_data, uint32_t par_sense_len,
 	}
 }
 
-struct scsi_dif_tuple {
-	__be16 guard;       /* Checksum */
-	__be16 app_tag;         /* APPL identifier */
-	__be32 ref_tag;         /* Target LBA or indirect LBA */
-};
-
 /*
  * Checks the guard or meta-data for the type of error
  * detected by the HBA. In case of errors, we set the
@@ -2101,29 +3163,39 @@ struct scsi_dif_tuple {
  * to indicate to the kernel that the HBA detected error.
  */
 static inline int
-qla2x00_handle_dif_error(srb_t *sp, struct sts_entry_24xx *sts24)
+qla2x00_handle_dif_error(srb_t *sp, void *pkt)
 {
 	struct scsi_qla_host *vha = sp->vha;
+	struct qla_hw_data *ha = vha->hw;
 	struct scsi_cmnd *cmd = GET_CMD_SP(sp);
-	uint8_t		*ap = &sts24->data[12];
-	uint8_t		*ep = &sts24->data[20];
+	struct sts_entry_24xx *sts24 = pkt;
+	struct sts_entry_24xx_ext *stsext = pkt;
+	uint8_t		*ap, *ep;
 	uint32_t	e_ref_tag, a_ref_tag;
 	uint16_t	e_app_tag, a_app_tag;
 	uint16_t	e_guard, a_guard;
+
+	if (IS_QLA29XX(ha)) {
+		ap = stsext->act_dif;
+		ep = stsext->exp_dif;
+	} else {
+		ap = &sts24->data[12];
+		ep = &sts24->data[20];
+	}
 
 	/*
 	 * swab32 of the "data" field in the beginning of qla2x00_status_entry()
 	 * would make guard field appear at offset 2
 	 */
-	a_guard   = le16_to_cpu(*(uint16_t *)(ap + 2));
-	a_app_tag = le16_to_cpu(*(uint16_t *)(ap + 0));
-	a_ref_tag = le32_to_cpu(*(uint32_t *)(ap + 4));
-	e_guard   = le16_to_cpu(*(uint16_t *)(ep + 2));
-	e_app_tag = le16_to_cpu(*(uint16_t *)(ep + 0));
-	e_ref_tag = le32_to_cpu(*(uint32_t *)(ep + 4));
+	a_guard   = get_unaligned_le16(ap + 2);
+	a_app_tag = get_unaligned_le16(ap + 0);
+	a_ref_tag = get_unaligned_le32(ap + 4);
+	e_guard   = get_unaligned_le16(ep + 2);
+	e_app_tag = get_unaligned_le16(ep + 0);
+	e_ref_tag = get_unaligned_le32(ep + 4);
 
 	ql_dbg(ql_dbg_io, vha, 0x3023,
-	    "iocb(s) %p Returned STATUS.\n", sts24);
+	    "iocb(s) %px Returned STATUS.\n", pkt);
 
 	ql_dbg(ql_dbg_io, vha, 0x3024,
 	    "DIF ERROR in cmd 0x%x lba 0x%llx act ref"
@@ -2137,9 +3209,9 @@ qla2x00_handle_dif_error(srb_t *sp, struct sts_entry_24xx *sts24)
 	 * For type     3: ref & app tag is all 'f's
 	 * For type 0,1,2: app tag is all 'f's
 	 */
-	if ((a_app_tag == T10_PI_APP_ESCAPE) &&
-	    ((scsi_get_prot_type(cmd) != SCSI_PROT_DIF_TYPE3) ||
-	     (a_ref_tag == T10_PI_REF_ESCAPE))) {
+	if (a_app_tag == be16_to_cpu(T10_PI_APP_ESCAPE) &&
+	    (scsi_get_prot_type(cmd) != SCSI_PROT_DIF_TYPE3 ||
+	     a_ref_tag == be32_to_cpu(T10_PI_REF_ESCAPE))) {
 		uint32_t blocks_done, resid;
 		sector_t lba_s = scsi_get_lba(cmd);
 
@@ -2191,31 +3263,25 @@ qla2x00_handle_dif_error(srb_t *sp, struct sts_entry_24xx *sts24)
 
 	/* check guard */
 	if (e_guard != a_guard) {
-		scsi_build_sense_buffer(1, cmd->sense_buffer, ILLEGAL_REQUEST,
-		    0x10, 0x1);
-		set_driver_byte(cmd, DRIVER_SENSE);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_GUARD_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
-		cmd->result |= SAM_STAT_CHECK_CONDITION << 1;
 		return 1;
 	}
 
 	/* check ref tag */
 	if (e_ref_tag != a_ref_tag) {
-		scsi_build_sense_buffer(1, cmd->sense_buffer, ILLEGAL_REQUEST,
-		    0x10, 0x3);
-		set_driver_byte(cmd, DRIVER_SENSE);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_REFERENCE_TAG_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
-		cmd->result |= SAM_STAT_CHECK_CONDITION << 1;
 		return 1;
 	}
 
 	/* check appl tag */
 	if (e_app_tag != a_app_tag) {
-		scsi_build_sense_buffer(1, cmd->sense_buffer, ILLEGAL_REQUEST,
-		    0x10, 0x2);
-		set_driver_byte(cmd, DRIVER_SENSE);
+		scsi_set_sense(cmd, 1, ILLEGAL_REQUEST,
+			       LOGICAL_BLOCK_APPLICATION_TAG_CHECK_FAILED);
 		set_host_byte(cmd, DID_ABORT);
-		cmd->result |= SAM_STAT_CHECK_CONDITION << 1;
 		return 1;
 	}
 
@@ -2235,10 +3301,8 @@ qla25xx_process_bidir_status_iocb(scsi_qla_host_t *vha, void *pkt,
 	struct bsg_job *bsg_job = NULL;
 	struct fc_bsg_request *bsg_request;
 	struct fc_bsg_reply *bsg_reply;
-	sts_entry_t *sts;
-	struct sts_entry_24xx *sts24;
-	sts = (sts_entry_t *) pkt;
-	sts24 = (struct sts_entry_24xx *) pkt;
+	sts_entry_t *sts = pkt;
+	struct sts_entry_24xx *sts24 = pkt;
 
 	/* Validate handle. */
 	if (index >= req->num_outstanding_cmds) {
@@ -2266,7 +3330,9 @@ qla25xx_process_bidir_status_iocb(scsi_qla_host_t *vha, void *pkt,
 
 	if (IS_FWI2_CAPABLE(ha)) {
 		comp_status = le16_to_cpu(sts24->comp_status);
-		scsi_status = le16_to_cpu(sts24->scsi_status) & SS_MASK;
+		scsi_status = IS_QLA29XX(ha) ?
+		    le16_to_cpu(((struct sts_entry_24xx_ext *)pkt)->u2.scsi_status) & SS_MASK :
+		    le16_to_cpu(sts24->scsi_status) & SS_MASK;
 	} else {
 		comp_status = le16_to_cpu(sts->comp_status);
 		scsi_status = le16_to_cpu(sts->scsi_status) & SS_MASK;
@@ -2368,13 +3434,14 @@ done:
 	bsg_job->reply_len = sizeof(struct fc_bsg_reply);
 	/* Always return DID_OK, bsg will send the vendor specific response
 	 * in this case only */
-	sp->done(sp, DID_OK << 6);
+	sp->done(sp, DID_OK << 16);
 
 }
 
 /**
  * qla2x00_status_entry() - Process a Status IOCB entry.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  * @pkt: Entry pointer
  */
 static void
@@ -2383,8 +3450,8 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 	srb_t		*sp;
 	fc_port_t	*fcport;
 	struct scsi_cmnd *cp;
-	sts_entry_t *sts;
-	struct sts_entry_24xx *sts24;
+	sts_entry_t *sts = pkt;
+	struct sts_entry_24xx *sts24 = pkt;
 	uint16_t	comp_status;
 	uint16_t	scsi_status;
 	uint16_t	ox_id;
@@ -2400,13 +3467,14 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 	int logit = 1;
 	int res = 0;
 	uint16_t state_flags = 0;
-	uint16_t retry_delay = 0;
+	uint16_t sts_qual = 0;
+	struct qla_sts_fwi2 sf;
 
-	sts = (sts_entry_t *) pkt;
-	sts24 = (struct sts_entry_24xx *) pkt;
 	if (IS_FWI2_CAPABLE(ha)) {
 		comp_status = le16_to_cpu(sts24->comp_status);
-		scsi_status = le16_to_cpu(sts24->scsi_status) & SS_MASK;
+		scsi_status = IS_QLA29XX(ha) ?
+		    le16_to_cpu(((struct sts_entry_24xx_ext *)pkt)->u2.scsi_status) & SS_MASK :
+		    le16_to_cpu(sts24->scsi_status) & SS_MASK;
 		state_flags = le16_to_cpu(sts24->state_flags);
 	} else {
 		comp_status = le16_to_cpu(sts->comp_status);
@@ -2448,6 +3516,7 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 		}
 		return;
 	}
+	qla_put_fw_resources(sp->qpair, &sp->iores);
 
 	if (sp->cmd_type != TYPE_SRB) {
 		req->outstanding_cmds[handle] = NULL;
@@ -2459,7 +3528,8 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 
 	/* NVME completion. */
 	if (sp->type == SRB_NVME_CMD) {
-		qla24xx_nvme_iocb_entry(vha, req, pkt);
+		req->outstanding_cmds[handle] = NULL;
+		qla24xx_nvme_iocb_entry(vha, req, pkt, sp);
 		return;
 	}
 
@@ -2474,20 +3544,31 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 		return;
 	}
 
+	/* Everything below is the SCSI fast path; reject other SRB types. */
+	if (sp->type != SRB_SCSI_CMD) {
+		ql_dbg(ql_dbg_io, vha, 0x303d,
+		    "Unexpected SRB type %x for status IOCB, sp %p.\n",
+		    sp->type, sp);
+		return;
+	}
+
 	/* Fast path completion. */
+	qla_chk_edif_rx_sa_delete_pending(vha, sp, pkt);
+	sp->qpair->cmd_completion_cnt++;
+
 	if (comp_status == CS_COMPLETE && scsi_status == 0) {
 		qla2x00_process_completed_request(vha, req, handle);
 
 		return;
 	}
 
-	req->outstanding_cmds[handle] = NULL;
 	cp = GET_CMD_SP(sp);
 	if (cp == NULL) {
 		ql_dbg(ql_dbg_io, vha, 0x3018,
 		    "Command already returned (0x%x/%p).\n",
 		    sts->handle, sp);
 
+		req->outstanding_cmds[handle] = NULL;
 		return;
 	}
 
@@ -2499,22 +3580,20 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 	sense_len = par_sense_len = rsp_info_len = resid_len =
 	    fw_resid_len = 0;
 	if (IS_FWI2_CAPABLE(ha)) {
+		qla_sts_fwi2_extract(ha, pkt, &sf);
 		if (scsi_status & SS_SENSE_LEN_VALID)
-			sense_len = le32_to_cpu(sts24->sense_len);
+			sense_len = sf.sense_len;
 		if (scsi_status & SS_RESPONSE_INFO_LEN_VALID)
-			rsp_info_len = le32_to_cpu(sts24->rsp_data_len);
+			rsp_info_len = sf.rsp_data_len;
 		if (scsi_status & (SS_RESIDUAL_UNDER | SS_RESIDUAL_OVER))
-			resid_len = le32_to_cpu(sts24->rsp_residual_count);
+			resid_len = sf.rsp_residual_count;
 		if (comp_status == CS_DATA_UNDERRUN)
 			fw_resid_len = le32_to_cpu(sts24->residual_len);
-		rsp_info = sts24->data;
-		sense_data = sts24->data;
-		host_to_fcp_swap(sts24->data, sizeof(sts24->data));
+		rsp_info = sf.data;
+		sense_data = sf.data;
+		par_sense_len = sf.data_sz;
+		sts_qual = sf.sts_qual;
 		ox_id = le16_to_cpu(sts24->ox_id);
-		par_sense_len = sizeof(sts24->data);
-		/* Valid values of the retry delay timer are 0x1-0xffef */
-		if (sts24->retry_delay > 0 && sts24->retry_delay < 0xfff1)
-			retry_delay = sts24->retry_delay;
 	} else {
 		if (scsi_status & SS_SENSE_LEN_VALID)
 			sense_len = le16_to_cpu(sts->req_sense_length);
@@ -2530,6 +3609,18 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 	if (scsi_status & SS_RESPONSE_INFO_LEN_VALID) {
 		/* Sense data lies beyond any FCP RESPONSE data. */
 		if (IS_FWI2_CAPABLE(ha)) {
+			/*
+			 * A hostile or buggy target may report an
+			 * rsp_info_len larger than the IOCB data area.
+			 * Clamp it so the par_sense_len subtraction cannot
+			 * underflow and walk sense_data out of bounds.
+			 */
+			if (rsp_info_len > par_sense_len) {
+				ql_log(ql_log_warn, fcport->vha, 0x3107,
+				       "Truncating bogus rsp_info_len 0x%x to 0x%x.\n",
+				       rsp_info_len, par_sense_len);
+				rsp_info_len = par_sense_len;
+			}
 			sense_data += rsp_info_len;
 			par_sense_len -= rsp_info_len;
 		}
@@ -2552,9 +3643,9 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 	 * Check retry_delay_timer value if we receive a busy or
 	 * queue full.
 	 */
-	if (lscsi_status == SAM_STAT_TASK_SET_FULL ||
-	    lscsi_status == SAM_STAT_BUSY)
-		qla2x00_set_retry_delay_timestamp(fcport, retry_delay);
+	if (unlikely(lscsi_status == SAM_STAT_TASK_SET_FULL ||
+		     lscsi_status == SAM_STAT_BUSY))
+		qla2x00_set_retry_delay_timestamp(fcport, sts_qual);
 
 	/*
 	 * Based on Host and scsi status generate status code for Linux
@@ -2606,9 +3697,9 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 		scsi_set_resid(cp, resid);
 		if (scsi_status & SS_RESIDUAL_UNDER) {
 			if (IS_FWI2_CAPABLE(ha) && fw_resid_len != resid_len) {
-				ql_dbg(ql_dbg_io, fcport->vha, 0x301d,
-				    "Dropped frame(s) detected (0x%x of 0x%x bytes).\n",
-				    resid, scsi_bufflen(cp));
+				ql_log(ql_log_warn, fcport->vha, 0x301d,
+				       "Dropped frame(s) detected (0x%x of 0x%x bytes).\n",
+				       resid, scsi_bufflen(cp));
 
 				res = DID_ERROR << 16 | lscsi_status;
 				goto check_scsi_status;
@@ -2631,9 +3722,11 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 			 * task not completed.
 			 */
 
-			ql_dbg(ql_dbg_io, fcport->vha, 0x301f,
-			    "Dropped frame(s) detected (0x%x of 0x%x bytes).\n",
-			    resid, scsi_bufflen(cp));
+			ql_log(ql_log_warn, fcport->vha, 0x301f,
+			       "Dropped frame(s) detected (0x%x of 0x%x bytes).\n",
+			       resid, scsi_bufflen(cp));
+
+			vha->interface_err_cnt++;
 
 			res = DID_ERROR << 16 | lscsi_status;
 			goto check_scsi_status;
@@ -2677,6 +3770,7 @@ check_scsi_status:
 	case CS_PORT_UNAVAILABLE:
 	case CS_TIMEOUT:
 	case CS_RESET:
+	case CS_EDIF_INV_REQ:
 
 		/*
 		 * We are going to have the fc class block the rport
@@ -2698,10 +3792,9 @@ check_scsi_status:
 				"Port to be marked lost on fcport=%02x%02x%02x, current "
 				"port state= %s comp_status %x.\n", fcport->d_id.b.domain,
 				fcport->d_id.b.area, fcport->d_id.b.al_pa,
-				port_state_str[atomic_read(&fcport->state)],
+				port_state_str[FCS_ONLINE],
 				comp_status);
 
-			qla2x00_mark_device_lost(fcport->vha, fcport, 1, 1);
 			qlt_schedule_sess_for_deletion(fcport);
 		}
 
@@ -2712,12 +3805,13 @@ check_scsi_status:
 		break;
 
 	case CS_DIF_ERROR:
-		logit = qla2x00_handle_dif_error(sp, sts24);
+		logit = qla2x00_handle_dif_error(sp, pkt);
 		res = cp->result;
 		break;
 
 	case CS_TRANSPORT:
 		res = DID_ERROR << 16;
+		vha->hw_err_cnt++;
 
 		if (!IS_PI_SPLIT_DET_CAPABLE(ha))
 			break;
@@ -2728,6 +3822,19 @@ check_scsi_status:
 			    cp->device->vendor);
 		break;
 
+	case CS_DMA:
+		ql_log(ql_log_info, fcport->vha, 0x3022,
+		    "CS_DMA error: 0x%x-0x%x (0x%x) nexus=%ld:%d:%llu portid=%06x oxid=0x%x cdb=%10phN len=0x%x rsp_info=0x%x resid=0x%x fw_resid=0x%x sp=%p cp=%p.\n",
+		    comp_status, scsi_status, res, vha->host_no,
+		    cp->device->id, cp->device->lun, fcport->d_id.b24,
+		    ox_id, cp->cmnd, scsi_bufflen(cp), rsp_info_len,
+		    resid_len, fw_resid_len, sp, cp);
+		ql_dump_buffer(ql_dbg_tgt + ql_dbg_verbose, vha, 0xe0ee,
+		    pkt, IS_QLA29XX(ha) ?
+		    sizeof(struct sts_entry_24xx_ext) : sizeof(*sts24));
+		res = DID_ERROR << 16;
+		vha->hw_err_cnt++;
+		break;
 	default:
 		res = DID_ERROR << 16;
 		break;
@@ -2736,28 +3843,30 @@ check_scsi_status:
 out:
 	if (logit)
 		ql_dbg(ql_dbg_io, fcport->vha, 0x3022,
-		    "FCP command status: 0x%x-0x%x (0x%x) nexus=%ld:%d:%llu "
-		    "portid=%02x%02x%02x oxid=0x%x cdb=%10phN len=0x%x "
-		    "rsp_info=0x%x resid=0x%x fw_resid=0x%x sp=%p cp=%p.\n",
-		    comp_status, scsi_status, res, vha->host_no,
-		    cp->device->id, cp->device->lun, fcport->d_id.b.domain,
-		    fcport->d_id.b.area, fcport->d_id.b.al_pa, ox_id,
-		    cp->cmnd, scsi_bufflen(cp), rsp_info_len,
-		    resid_len, fw_resid_len, sp, cp);
+		       "FCP command status: 0x%x-0x%x (0x%x) nexus=%ld:%d:%llu portid=%02x%02x%02x oxid=0x%x cdb=%10phN len=0x%x rsp_info=0x%x resid=0x%x fw_resid=0x%x sp=%p cp=%p.\n",
+		       comp_status, scsi_status, res, vha->host_no,
+		       cp->device->id, cp->device->lun, fcport->d_id.b.domain,
+		       fcport->d_id.b.area, fcport->d_id.b.al_pa, ox_id,
+		       cp->cmnd, scsi_bufflen(cp), rsp_info_len,
+		       resid_len, fw_resid_len, sp, cp);
 
 	if (rsp->status_srb == NULL)
 		sp->done(sp, res);
+
+	/* for io's, clearing of outstanding_cmds[handle] means scsi_done was called */
+	req->outstanding_cmds[handle] = NULL;
 }
 
 /**
  * qla2x00_status_cont_entry() - Process a Status Continuations entry.
- * @ha: SCSI driver HA context
+ * @rsp: response queue
  * @pkt: Entry pointer
+ * @data_sz: maximum sense-data payload size for this entry
  *
  * Extended sense data.
  */
 static void
-qla2x00_status_cont_entry(struct rsp_que *rsp, sts_cont_entry_t *pkt)
+qla2x00_status_cont_entry(struct rsp_que *rsp, void *pkt, u32 data_sz)
 {
 	uint8_t	sense_sz = 0;
 	struct qla_hw_data *ha = rsp->hw;
@@ -2766,6 +3875,7 @@ qla2x00_status_cont_entry(struct rsp_que *rsp, sts_cont_entry_t *pkt)
 	struct scsi_cmnd *cp;
 	uint32_t sense_len;
 	uint8_t *sense_ptr;
+	u8 *data = ((sts_cont_entry_t *)pkt)->data;
 
 	if (!sp || !GET_CMD_SENSE_LEN(sp))
 		return;
@@ -2782,15 +3892,15 @@ qla2x00_status_cont_entry(struct rsp_que *rsp, sts_cont_entry_t *pkt)
 		return;
 	}
 
-	if (sense_len > sizeof(pkt->data))
-		sense_sz = sizeof(pkt->data);
+	if (sense_len > data_sz)
+		sense_sz = data_sz;
 	else
 		sense_sz = sense_len;
 
 	/* Move sense data. */
 	if (IS_FWI2_CAPABLE(ha))
-		host_to_fcp_swap(pkt->data, sizeof(pkt->data));
-	memcpy(sense_ptr, pkt->data, sense_sz);
+		host_to_fcp_swap(data, data_sz);
+	memcpy(sense_ptr, data, sense_sz);
 	ql_dump_buffer(ql_dbg_io + ql_dbg_buffer, vha, 0x302c,
 		sense_ptr, sense_sz);
 
@@ -2809,7 +3919,8 @@ qla2x00_status_cont_entry(struct rsp_que *rsp, sts_cont_entry_t *pkt)
 
 /**
  * qla2x00_error_entry() - Process an error entry.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  * @pkt: Entry pointer
  * return : 1=allow further error analysis. 0=no additional error analysis.
  */
@@ -2822,15 +3933,18 @@ qla2x00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, sts_entry_t *pkt)
 	uint16_t que = MSW(pkt->handle);
 	struct req_que *req = NULL;
 	int res = DID_ERROR << 16;
+	u16 index;
 
 	ql_dbg(ql_dbg_async, vha, 0x502a,
 	    "iocb type %xh with error status %xh, handle %xh, rspq id %d\n",
 	    pkt->entry_type, pkt->entry_status, pkt->handle, rsp->id);
 
-	if (que >= ha->max_req_queues || !ha->req_q_map[que])
+	if (que >= ha->max_req_queues)
 		goto fatal;
 
 	req = ha->req_q_map[que];
+	if (!req)
+		goto fatal;
 
 	if (pkt->entry_status & RF_BUSY)
 		res = DID_BUS_BUSY << 16;
@@ -2840,13 +3954,13 @@ qla2x00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, sts_entry_t *pkt)
 
 	switch (pkt->entry_type) {
 	case NOTIFY_ACK_TYPE:
-	case STATUS_TYPE:
 	case STATUS_CONT_TYPE:
 	case LOGINOUT_PORT_IOCB_TYPE:
 	case CT_IOCB_TYPE:
 	case ELS_IOCB_TYPE:
 	case ABORT_IOCB_TYPE:
 	case MBX_IOCB_TYPE:
+	default:
 		sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
 		if (sp) {
 			sp->done(sp, res);
@@ -2854,11 +3968,19 @@ qla2x00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, sts_entry_t *pkt)
 		}
 		break;
 
+	case SA_UPDATE_IOCB_TYPE:
 	case ABTS_RESP_24XX:
 	case CTIO_TYPE7:
 	case CTIO_CRC2:
-	default:
 		return 1;
+	case STATUS_TYPE:
+		sp = qla_get_sp_from_handle(vha, func, req, pkt, &index);
+		if (sp) {
+			sp->done(sp, res);
+			req->outstanding_cmds[index] = NULL;
+			return 0;
+		}
+		break;
 	}
 fatal:
 	ql_log(ql_log_warn, vha, 0x5030,
@@ -2868,7 +3990,7 @@ fatal:
 
 /**
  * qla24xx_mbx_completion() - Process mailbox command completions.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
  * @mb0: Mailbox0 register
  */
 static void
@@ -2876,7 +3998,7 @@ qla24xx_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 {
 	uint16_t	cnt;
 	uint32_t	mboxes;
-	uint16_t __iomem *wptr;
+	__le16 __iomem *wptr;
 	struct qla_hw_data *ha = vha->hw;
 	struct device_reg_24xx __iomem *reg = &ha->iobase->isp24;
 
@@ -2892,11 +4014,11 @@ qla24xx_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 	ha->flags.mbox_int = 1;
 	ha->mailbox_out[0] = mb0;
 	mboxes >>= 1;
-	wptr = (uint16_t __iomem *)&reg->mailbox1;
+	wptr = &reg->mailbox1;
 
 	for (cnt = 1; cnt < ha->mbx_count; cnt++) {
 		if (mboxes & BIT_0)
-			ha->mailbox_out[cnt] = RD_REG_WORD(wptr);
+			ha->mailbox_out[cnt] = rd_reg_word(wptr);
 
 		mboxes >>= 1;
 		wptr++;
@@ -2905,10 +4027,11 @@ qla24xx_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 
 static void
 qla24xx_abort_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
-	struct abort_entry_24xx *pkt)
+	void *pkt)
 {
 	const char func[] = "ABT_IOCB";
 	srb_t *sp;
+	srb_t *orig_sp = NULL;
 	struct srb_iocb *abt;
 
 	sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
@@ -2916,12 +4039,24 @@ qla24xx_abort_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
 		return;
 
 	abt = &sp->u.iocb_cmd;
-	abt->u.abt.comp_status = le16_to_cpu(pkt->nport_handle);
+	/*
+	 * abort_entry_24xx_ext overlays abort_entry_24xx through the
+	 * nport_handle/comp_status union at offset 8, so reading
+	 * comp_status is stride-agnostic and goes through the 24xx view.
+	 */
+	abt->u.abt.comp_status =
+	    ((struct abort_entry_24xx *)pkt)->comp_status;
+
+	orig_sp = sp->cmd_sp;
+	/* Need to pass original sp */
+	if (orig_sp)
+		qla_nvme_abort_process_comp_status(pkt, orig_sp);
+
 	sp->done(sp, 0);
 }
 
 void qla24xx_nvme_ls4_iocb(struct scsi_qla_host *vha,
-    struct pt_ls4_request *pkt, struct req_que *req)
+			   void *pkt, struct req_que *req)
 {
 	srb_t *sp;
 	const char func[] = "LS4_IOCB";
@@ -2931,39 +4066,121 @@ void qla24xx_nvme_ls4_iocb(struct scsi_qla_host *vha,
 	if (!sp)
 		return;
 
-	comp_status = le16_to_cpu(pkt->status);
+	/* status lives at the same offset (8) in both IOCB strides */
+	comp_status = le16_to_cpu(((struct pt_ls4_request *)pkt)->status);
+
 	sp->done(sp, comp_status);
 }
 
 /**
+ * qla_chk_cont_iocb_avail - check for all continuation iocbs are available
+ *   before iocb processing can start.
+ * @vha: host adapter pointer
+ * @rsp: respond queue
+ * @pkt: head iocb describing how many continuation iocb
+ * Return: 0 all iocbs has arrived, xx- all iocbs have not arrived.
+ */
+static int qla_chk_cont_iocb_avail(struct scsi_qla_host *vha,
+	struct rsp_que *rsp, response_t *pkt, u32 rsp_q_in)
+{
+	int start_pkt_ring_index;
+	u32 iocb_cnt = 0;
+	int rc = 0;
+
+	if (pkt->entry_count == 1)
+		return rc;
+
+	/* ring_index was pre-increment. set it back to current pkt */
+	if (rsp->ring_index == 0)
+		start_pkt_ring_index = rsp->length - 1;
+	else
+		start_pkt_ring_index = rsp->ring_index - 1;
+
+	if (rsp_q_in < start_pkt_ring_index)
+		/* q in ptr is wrapped */
+		iocb_cnt = rsp->length - start_pkt_ring_index + rsp_q_in;
+	else
+		iocb_cnt = rsp_q_in - start_pkt_ring_index;
+
+	if (iocb_cnt < pkt->entry_count)
+		rc = -EIO;
+
+	ql_dbg(ql_dbg_init, vha, 0x5091,
+	       "%s - ring %p pkt %p entry count %d iocb_cnt %d rsp_q_in %d rc %d\n",
+	       __func__, rsp->ring, pkt, pkt->entry_count, iocb_cnt, rsp_q_in, rc);
+
+	return rc;
+}
+
+static void qla_marker_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
+	void *pkt)
+{
+	const char func[] = "MRK-IOCB";
+	struct mrk_entry_24xx *mrk = pkt;
+	srb_t *sp;
+	int res = QLA_SUCCESS;
+
+	if (!IS_FWI2_CAPABLE(vha->hw))
+		return;
+
+	sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
+	if (!sp)
+		return;
+
+	if (mrk->entry_status) {
+		ql_dbg(ql_dbg_taskm, vha, 0x8025, "marker failure.\n");
+		res = QLA_COMMAND_ERROR;
+	}
+	sp->u.iocb_cmd.u.tmf.data = res;
+	sp->done(sp, res);
+}
+
+/**
  * qla24xx_process_response_queue() - Process response queue entries.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  */
 void qla24xx_process_response_queue(struct scsi_qla_host *vha,
 	struct rsp_que *rsp)
 {
-	struct sts_entry_24xx *pkt;
+	void *pkt;
 	struct qla_hw_data *ha = vha->hw;
+	struct purex_entry_24xx_ext *purex_entry_ext;
+	struct purex_entry_24xx *purex_entry;
+	struct purex_item *pure_item;
+	struct pt_ls4_rx_unsol *p;
+	u16 rsp_in = 0, cur_ring_index;
+	int is_shadow_hba;
 
 	if (!ha->flags.fw_started)
 		return;
 
-	if (rsp->qpair->cpuid != smp_processor_id())
-		qla_cpu_update(rsp->qpair, smp_processor_id());
+	if (rsp->qpair->cpuid != raw_smp_processor_id() || !rsp->qpair->rcv_intr) {
+		rsp->qpair->rcv_intr = 1;
 
-	while (rsp->ring_ptr->signature != RESPONSE_PROCESSED) {
-		pkt = (struct sts_entry_24xx *)rsp->ring_ptr;
+		if (!rsp->qpair->cpu_mapped)
+			qla_cpu_update(rsp->qpair, raw_smp_processor_id());
+	}
 
-		rsp->ring_index++;
-		if (rsp->ring_index == rsp->length) {
-			rsp->ring_index = 0;
-			rsp->ring_ptr = rsp->ring;
-		} else {
-			rsp->ring_ptr++;
-		}
+#define __update_rsp_in(_is_shadow_hba, _rsp, _rsp_in)			\
+	do {								\
+		_rsp_in = _is_shadow_hba ? *(_rsp)->in_ptr :		\
+				rd_reg_dword_relaxed((_rsp)->rsp_q_in);	\
+	} while (0)
 
-		if (pkt->entry_status != 0) {
-			if (qla2x00_error_entry(vha, rsp, (sts_entry_t *) pkt))
+	is_shadow_hba = IS_SHADOW_REG_CAPABLE(ha);
+
+	__update_rsp_in(is_shadow_hba, rsp, rsp_in);
+
+	while (rsp->ring_index != rsp_in &&
+		       rsp->ring_ptr->signature != RESPONSE_PROCESSED) {
+		pkt = (void *)rsp->ring_ptr;
+		cur_ring_index = rsp->ring_index;
+
+		qla_rsp_ring_advance(rsp);
+
+		if (((response_t *)pkt)->entry_status != 0) {
+			if (qla2x00_error_entry(vha, rsp, (sts_entry_t *)pkt))
 				goto process_err;
 
 			((response_t *)pkt)->signature = RESPONSE_PROCESSED;
@@ -2972,20 +4189,19 @@ void qla24xx_process_response_queue(struct scsi_qla_host *vha,
 		}
 process_err:
 
-		switch (pkt->entry_type) {
+		switch (((response_t *)pkt)->entry_type) {
 		case STATUS_TYPE:
 			qla2x00_status_entry(vha, rsp, pkt);
 			break;
 		case STATUS_CONT_TYPE:
-			qla2x00_status_cont_entry(rsp, (sts_cont_entry_t *)pkt);
+			qla2x00_status_cont_entry(rsp, pkt,
+			    qla_sts_cont_data_size(rsp->hw));
 			break;
 		case VP_RPT_ID_IOCB_TYPE:
-			qla24xx_report_id_acquisition(vha,
-			    (struct vp_rpt_id_entry_24xx *)pkt);
+			qla24xx_report_id_acquisition(vha, pkt);
 			break;
 		case LOGINOUT_PORT_IOCB_TYPE:
-			qla24xx_logio_entry(vha, rsp->req,
-			    (struct logio_entry_24xx *)pkt);
+			qla24xx_logio_entry(vha, rsp->req, pkt);
 			break;
 		case CT_IOCB_TYPE:
 			qla24xx_els_ct_entry(vha, rsp->req, pkt, CT_IOCB_TYPE);
@@ -2994,7 +4210,16 @@ process_err:
 			qla24xx_els_ct_entry(vha, rsp->req, pkt, ELS_IOCB_TYPE);
 			break;
 		case ABTS_RECV_24XX:
-			if (IS_QLA83XX(ha) || IS_QLA27XX(ha)) {
+			if (qla_ini_mode_enabled(vha)) {
+				pure_item = qla24xx_copy_std_pkt(vha, pkt);
+				if (!pure_item)
+					break;
+				qla24xx_queue_purex_item(vha, pure_item,
+							 qla24xx_process_abts);
+				break;
+			}
+			if (IS_QLA83XX(ha) || IS_QLA27XX(ha) ||
+			    IS_QLA28XX(ha)) {
 				/* ensure that the ATIO queue is empty */
 				qlt_handle_abts_recv(vha, rsp,
 				    (response_t *)pkt);
@@ -3002,18 +4227,17 @@ process_err:
 			} else {
 				qlt_24xx_process_atio_queue(vha, 1);
 			}
-			/* fall through */
+			fallthrough;
 		case ABTS_RESP_24XX:
 		case CTIO_TYPE7:
 		case CTIO_CRC2:
 			qlt_response_pkt_all_vps(vha, rsp, (response_t *)pkt);
 			break;
 		case PT_LS4_REQUEST:
-			qla24xx_nvme_ls4_iocb(vha, (struct pt_ls4_request *)pkt,
-			    rsp->req);
+			qla24xx_nvme_ls4_iocb(vha, pkt, rsp->req);
 			break;
 		case NOTIFY_ACK_TYPE:
-			if (pkt->handle == QLA_TGT_SKIP_HANDLE)
+			if (((response_t *)pkt)->handle == QLA_TGT_SKIP_HANDLE)
 				qlt_response_pkt_all_vps(vha, rsp,
 				    (response_t *)pkt);
 			else
@@ -3021,28 +4245,118 @@ process_err:
 					(struct nack_to_isp *)pkt);
 			break;
 		case MARKER_TYPE:
-			/* Do nothing in this case, this check is to prevent it
-			 * from falling into default case
-			 */
+			qla_marker_iocb_entry(vha, rsp->req, pkt);
 			break;
 		case ABORT_IOCB_TYPE:
-			qla24xx_abort_iocb_entry(vha, rsp->req,
-			    (struct abort_entry_24xx *)pkt);
+			qla24xx_abort_iocb_entry(vha, rsp->req, pkt);
 			break;
 		case MBX_IOCB_TYPE:
 			qla24xx_mbx_iocb_entry(vha, rsp->req,
 			    (struct mbx_24xx_entry *)pkt);
 			break;
 		case VP_CTRL_IOCB_TYPE:
-			qla_ctrlvp_completed(vha, rsp->req,
-			    (struct vp_ctrl_entry_24xx *)pkt);
+			qla_ctrlvp_completed(vha, rsp->req, pkt);
+			break;
+		case PUREX_IOCB_TYPE:
+			if (IS_QLA29XX(ha)) {
+				purex_entry_ext = (void *)pkt;
+				purex_entry = NULL;
+			} else {
+				purex_entry = (void *)pkt;
+				purex_entry_ext = NULL;
+			}
+			switch (IS_QLA29XX(ha) ?
+			    purex_entry_ext->els_frame_payload[3] :
+			    purex_entry->els_frame_payload[3]) {
+			case ELS_RDP:
+				pure_item = qla24xx_copy_std_pkt(vha, pkt);
+				if (!pure_item)
+					break;
+				qla24xx_queue_purex_item(vha, pure_item,
+						 qla24xx_process_purex_rdp);
+				break;
+			case ELS_FPIN:
+				if (!vha->hw->flags.scm_enabled) {
+					ql_log(ql_log_warn, vha, 0x5094,
+					       "SCM not active for this port\n");
+					break;
+				}
+				if (qla_chk_cont_iocb_avail(vha, rsp,
+				    (response_t *)pkt, rsp_in)) {
+					/*
+					 * ring_ptr and ring_index were
+					 * pre-incremented above. Reset them
+					 * back to current. Wait for next
+					 * interrupt with all IOCBs to arrive
+					 * and re-process.
+					 */
+					qla_rsp_ring_rewind_to(rsp,
+					    (response_t *)pkt, cur_ring_index);
+
+					ql_dbg(ql_dbg_init, vha, 0x5095,
+					    "Defer processing FPIN...\n");
+					return;
+				}
+				pure_item = qla27xx_copy_fpin_pkt(vha,
+							  (void **)&pkt, &rsp);
+				if (!pure_item)
+					break;
+				qla24xx_queue_purex_item(vha, pure_item,
+						 qla27xx_process_purex_fpin);
+				break;
+
+			case ELS_AUTH_ELS:
+				if (qla_chk_cont_iocb_avail(vha, rsp, (response_t *)pkt, rsp_in)) {
+					/*
+					 * ring_ptr and ring_index were
+					 * pre-incremented above. Reset them
+					 * back to current. Wait for next
+					 * interrupt with all IOCBs to arrive
+					 * and re-process.
+					 */
+					qla_rsp_ring_rewind_to(rsp,
+					    (response_t *)pkt, cur_ring_index);
+
+					ql_dbg(ql_dbg_init, vha, 0x5091,
+					    "Defer processing ELS opcode %#x...\n",
+					    IS_QLA29XX(ha) ?
+					    purex_entry_ext->els_frame_payload[3] :
+					    purex_entry->els_frame_payload[3]);
+					return;
+				}
+				qla24xx_auth_els(vha, (void **)&pkt, &rsp);
+				break;
+			default:
+				ql_log(ql_log_warn, vha, 0x509c,
+				       "Discarding ELS Request opcode 0x%x...\n",
+				       IS_QLA29XX(ha) ?
+				       purex_entry_ext->els_frame_payload[3] :
+				       purex_entry->els_frame_payload[3]);
+			}
+			break;
+		case SA_UPDATE_IOCB_TYPE:
+			qla28xx_sa_update_iocb_entry(vha, rsp->req,
+				(struct sa_update_28xx *)pkt);
+			break;
+		case PT_LS4_UNSOL:
+			p = (void *)pkt;
+			if (qla_chk_cont_iocb_avail(vha, rsp, (response_t *)pkt, rsp_in)) {
+				qla_rsp_ring_rewind_to(rsp, (response_t *)pkt,
+						       cur_ring_index);
+
+				ql_dbg(ql_dbg_init, vha, 0x2124,
+				       "Defer processing UNSOL LS req opcode %#x...\n",
+				       p->payload[0]);
+				return;
+			}
+			qla2xxx_process_purls_iocb((void **)&pkt, &rsp);
 			break;
 		default:
 			/* Type Not Supported. */
 			ql_dbg(ql_dbg_async, vha, 0x5042,
-			    "Received unknown response pkt type %x "
-			    "entry status=%x.\n",
-			    pkt->entry_type, pkt->entry_status);
+			       "Received unknown response pkt type 0x%x entry status=%x.\n",
+			       ((response_t *)pkt)->entry_type,
+			       ((response_t *)pkt)->entry_status);
 			break;
 		}
 		((response_t *)pkt)->signature = RESPONSE_PROCESSED;
@@ -3052,9 +4366,10 @@ process_err:
 	/* Adjust ring index */
 	if (IS_P3P_TYPE(ha)) {
 		struct device_reg_82xx __iomem *reg = &ha->iobase->isp82;
-		WRT_REG_DWORD(&reg->rsp_q_out[0], rsp->ring_index);
+
+		wrt_reg_dword(&reg->rsp_q_out[0], rsp->ring_index);
 	} else {
-		WRT_REG_DWORD(rsp->rsp_q_out, rsp->ring_index);
+		wrt_reg_dword(rsp->rsp_q_out, rsp->ring_index);
 	}
 }
 
@@ -3067,17 +4382,17 @@ qla2xxx_check_risc_status(scsi_qla_host_t *vha)
 	struct device_reg_24xx __iomem *reg = &ha->iobase->isp24;
 
 	if (!IS_QLA25XX(ha) && !IS_QLA81XX(ha) && !IS_QLA83XX(ha) &&
-	    !IS_QLA27XX(ha))
+	    !IS_QLA27XX(ha) && !IS_QLA28XX(ha))
 		return;
 
 	rval = QLA_SUCCESS;
-	WRT_REG_DWORD(&reg->iobase_addr, 0x7C00);
-	RD_REG_DWORD(&reg->iobase_addr);
-	WRT_REG_DWORD(&reg->iobase_window, 0x0001);
-	for (cnt = 10000; (RD_REG_DWORD(&reg->iobase_window) & BIT_0) == 0 &&
+	wrt_reg_dword(&reg->iobase_addr, 0x7C00);
+	rd_reg_dword(&reg->iobase_addr);
+	wrt_reg_dword(&reg->iobase_window, 0x0001);
+	for (cnt = 10000; (rd_reg_dword(&reg->iobase_window) & BIT_0) == 0 &&
 	    rval == QLA_SUCCESS; cnt--) {
 		if (cnt) {
-			WRT_REG_DWORD(&reg->iobase_window, 0x0001);
+			wrt_reg_dword(&reg->iobase_window, 0x0001);
 			udelay(10);
 		} else
 			rval = QLA_FUNCTION_TIMEOUT;
@@ -3086,11 +4401,11 @@ qla2xxx_check_risc_status(scsi_qla_host_t *vha)
 		goto next_test;
 
 	rval = QLA_SUCCESS;
-	WRT_REG_DWORD(&reg->iobase_window, 0x0003);
-	for (cnt = 100; (RD_REG_DWORD(&reg->iobase_window) & BIT_0) == 0 &&
+	wrt_reg_dword(&reg->iobase_window, 0x0003);
+	for (cnt = 100; (rd_reg_dword(&reg->iobase_window) & BIT_0) == 0 &&
 	    rval == QLA_SUCCESS; cnt--) {
 		if (cnt) {
-			WRT_REG_DWORD(&reg->iobase_window, 0x0003);
+			wrt_reg_dword(&reg->iobase_window, 0x0003);
 			udelay(10);
 		} else
 			rval = QLA_FUNCTION_TIMEOUT;
@@ -3099,18 +4414,18 @@ qla2xxx_check_risc_status(scsi_qla_host_t *vha)
 		goto done;
 
 next_test:
-	if (RD_REG_DWORD(&reg->iobase_c8) & BIT_3)
+	if (rd_reg_dword(&reg->iobase_c8) & BIT_3)
 		ql_log(ql_log_info, vha, 0x504c,
 		    "Additional code -- 0x55AA.\n");
 
 done:
-	WRT_REG_DWORD(&reg->iobase_window, 0x0000);
-	RD_REG_DWORD(&reg->iobase_window);
+	wrt_reg_dword(&reg->iobase_window, 0x0000);
+	rd_reg_dword(&reg->iobase_window);
 }
 
 /**
  * qla24xx_intr_handler() - Process interrupts for the ISP23xx and ISP24xx.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.
@@ -3130,6 +4445,7 @@ qla24xx_intr_handler(int irq, void *dev_id)
 	uint16_t	mb[8];
 	struct rsp_que *rsp;
 	unsigned long	flags;
+	bool process_atio = false;
 
 	rsp = (struct rsp_que *) dev_id;
 	if (!rsp) {
@@ -3148,14 +4464,14 @@ qla24xx_intr_handler(int irq, void *dev_id)
 	spin_lock_irqsave(&ha->hardware_lock, flags);
 	vha = pci_get_drvdata(ha->pdev);
 	for (iter = 50; iter--; ) {
-		stat = RD_REG_DWORD(&reg->host_status);
+		stat = rd_reg_dword(&reg->host_status);
 		if (qla2x00_check_reg32_for_disconnect(vha, stat))
 			break;
 		if (stat & HSRX_RISC_PAUSED) {
 			if (unlikely(pci_channel_offline(ha->pdev)))
 				break;
 
-			hccr = RD_REG_DWORD(&reg->hccr);
+			hccr = rd_reg_dword(&reg->hccr);
 
 			ql_log(ql_log_warn, vha, 0x504b,
 			    "RISC paused -- HCCR=%x, Dumping firmware.\n",
@@ -3163,7 +4479,7 @@ qla24xx_intr_handler(int irq, void *dev_id)
 
 			qla2xxx_check_risc_status(vha);
 
-			ha->isp_ops->fw_dump(vha, 1);
+			ha->isp_ops->fw_dump(vha);
 			set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 			break;
 		} else if ((stat & HSRX_RISC_INT) == 0)
@@ -3180,9 +4496,9 @@ qla24xx_intr_handler(int irq, void *dev_id)
 			break;
 		case INTR_ASYNC_EVENT:
 			mb[0] = MSW(stat);
-			mb[1] = RD_REG_WORD(&reg->mailbox1);
-			mb[2] = RD_REG_WORD(&reg->mailbox2);
-			mb[3] = RD_REG_WORD(&reg->mailbox3);
+			mb[1] = rd_reg_word(&reg->mailbox1);
+			mb[2] = rd_reg_word(&reg->mailbox2);
+			mb[3] = rd_reg_word(&reg->mailbox3);
 			qla2x00_async_event(vha, rsp, mb);
 			break;
 		case INTR_RSP_QUE_UPDATE:
@@ -3190,34 +4506,31 @@ qla24xx_intr_handler(int irq, void *dev_id)
 			qla24xx_process_response_queue(vha, rsp);
 			break;
 		case INTR_ATIO_QUE_UPDATE_27XX:
-		case INTR_ATIO_QUE_UPDATE:{
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
+		case INTR_ATIO_QUE_UPDATE:
+			process_atio = true;
 			break;
-		}
-		case INTR_ATIO_RSP_QUE_UPDATE: {
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
-
+		case INTR_ATIO_RSP_QUE_UPDATE:
+			process_atio = true;
 			qla24xx_process_response_queue(vha, rsp);
 			break;
-		}
 		default:
 			ql_dbg(ql_dbg_async, vha, 0x504f,
 			    "Unrecognized interrupt type (%d).\n", stat * 0xff);
 			break;
 		}
-		WRT_REG_DWORD(&reg->hccr, HCCRX_CLR_RISC_INT);
-		RD_REG_DWORD_RELAXED(&reg->hccr);
+		wrt_reg_dword(&reg->hccr, HCCRX_CLR_RISC_INT);
+		rd_reg_dword_relaxed(&reg->hccr);
 		if (unlikely(IS_QLA83XX(ha) && (ha->pdev->revision == 1)))
 			ndelay(3500);
 	}
 	qla2x00_handle_mbx_completion(ha, status);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+
+	if (process_atio) {
+		spin_lock_irqsave(&ha->tgt.atio_lock, flags);
+		qlt_24xx_process_atio_queue(vha, 0);
+		spin_unlock_irqrestore(&ha->tgt.atio_lock, flags);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -3245,8 +4558,8 @@ qla24xx_msix_rsp_q(int irq, void *dev_id)
 	vha = pci_get_drvdata(ha->pdev);
 	qla24xx_process_response_queue(vha, rsp);
 	if (!ha->flags.disable_msix_handshake) {
-		WRT_REG_DWORD(&reg->hccr, HCCRX_CLR_RISC_INT);
-		RD_REG_DWORD_RELAXED(&reg->hccr);
+		wrt_reg_dword(&reg->hccr, HCCRX_CLR_RISC_INT);
+		rd_reg_dword_relaxed(&reg->hccr);
 	}
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
 
@@ -3265,6 +4578,7 @@ qla24xx_msix_default(int irq, void *dev_id)
 	uint32_t	hccr;
 	uint16_t	mb[8];
 	unsigned long flags;
+	bool process_atio = false;
 
 	rsp = (struct rsp_que *) dev_id;
 	if (!rsp) {
@@ -3279,22 +4593,23 @@ qla24xx_msix_default(int irq, void *dev_id)
 	spin_lock_irqsave(&ha->hardware_lock, flags);
 	vha = pci_get_drvdata(ha->pdev);
 	do {
-		stat = RD_REG_DWORD(&reg->host_status);
+		stat = rd_reg_dword(&reg->host_status);
 		if (qla2x00_check_reg32_for_disconnect(vha, stat))
 			break;
 		if (stat & HSRX_RISC_PAUSED) {
 			if (unlikely(pci_channel_offline(ha->pdev)))
 				break;
 
-			hccr = RD_REG_DWORD(&reg->hccr);
+			hccr = rd_reg_dword(&reg->hccr);
 
 			ql_log(ql_log_info, vha, 0x5050,
 			    "RISC paused -- HCCR=%x, Dumping firmware.\n",
 			    hccr);
 
 			qla2xxx_check_risc_status(vha);
+			vha->hw_err_cnt++;
 
-			ha->isp_ops->fw_dump(vha, 1);
+			ha->isp_ops->fw_dump(vha);
 			set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 			break;
 		} else if ((stat & HSRX_RISC_INT) == 0)
@@ -3311,9 +4626,9 @@ qla24xx_msix_default(int irq, void *dev_id)
 			break;
 		case INTR_ASYNC_EVENT:
 			mb[0] = MSW(stat);
-			mb[1] = RD_REG_WORD(&reg->mailbox1);
-			mb[2] = RD_REG_WORD(&reg->mailbox2);
-			mb[3] = RD_REG_WORD(&reg->mailbox3);
+			mb[1] = rd_reg_word(&reg->mailbox1);
+			mb[2] = rd_reg_word(&reg->mailbox2);
+			mb[3] = rd_reg_word(&reg->mailbox3);
 			qla2x00_async_event(vha, rsp, mb);
 			break;
 		case INTR_RSP_QUE_UPDATE:
@@ -3321,31 +4636,28 @@ qla24xx_msix_default(int irq, void *dev_id)
 			qla24xx_process_response_queue(vha, rsp);
 			break;
 		case INTR_ATIO_QUE_UPDATE_27XX:
-		case INTR_ATIO_QUE_UPDATE:{
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
+		case INTR_ATIO_QUE_UPDATE:
+			process_atio = true;
 			break;
-		}
-		case INTR_ATIO_RSP_QUE_UPDATE: {
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
-
+		case INTR_ATIO_RSP_QUE_UPDATE:
+			process_atio = true;
 			qla24xx_process_response_queue(vha, rsp);
 			break;
-		}
 		default:
 			ql_dbg(ql_dbg_async, vha, 0x5051,
 			    "Unrecognized interrupt type (%d).\n", stat & 0xff);
 			break;
 		}
-		WRT_REG_DWORD(&reg->hccr, HCCRX_CLR_RISC_INT);
+		wrt_reg_dword(&reg->hccr, HCCRX_CLR_RISC_INT);
 	} while (0);
 	qla2x00_handle_mbx_completion(ha, status);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+
+	if (process_atio) {
+		spin_lock_irqsave(&ha->tgt.atio_lock, flags);
+		qlt_24xx_process_atio_queue(vha, 0);
+		spin_unlock_irqrestore(&ha->tgt.atio_lock, flags);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -3355,8 +4667,6 @@ qla2xxx_msix_rsp_q(int irq, void *dev_id)
 {
 	struct qla_hw_data *ha;
 	struct qla_qpair *qpair;
-	struct device_reg_24xx __iomem *reg;
-	unsigned long flags;
 
 	qpair = dev_id;
 	if (!qpair) {
@@ -3365,14 +4675,6 @@ qla2xxx_msix_rsp_q(int irq, void *dev_id)
 		return IRQ_NONE;
 	}
 	ha = qpair->hw;
-
-	/* Clear the interrupt, if enabled, for this response queue */
-	if (unlikely(!ha->flags.disable_msix_handshake)) {
-		reg = &ha->iobase->isp24;
-		spin_lock_irqsave(&ha->hardware_lock, flags);
-		WRT_REG_DWORD(&reg->hccr, HCCRX_CLR_RISC_INT);
-		spin_unlock_irqrestore(&ha->hardware_lock, flags);
-	}
 
 	queue_work(ha->wq, &qpair->q_work);
 
@@ -3415,14 +4717,16 @@ qla24xx_enable_msix(struct qla_hw_data *ha, struct rsp_que *rsp)
 		min_vecs++;
 	}
 
-	if (USER_CTRL_IRQ(ha)) {
+	if (USER_CTRL_IRQ(ha) || !ha->mqiobase) {
 		/* user wants to control IRQ setting for target mode */
 		ret = pci_alloc_irq_vectors(ha->pdev, min_vecs,
-		    ha->msix_count, PCI_IRQ_MSIX);
+			blk_mq_num_online_queues(ha->msix_count) + min_vecs,
+			PCI_IRQ_MSIX);
 	} else
 		ret = pci_alloc_irq_vectors_affinity(ha->pdev, min_vecs,
-		    ha->msix_count, PCI_IRQ_MSIX | PCI_IRQ_AFFINITY,
-		    &desc);
+			blk_mq_num_online_queues(ha->msix_count) + min_vecs,
+			PCI_IRQ_MSIX | PCI_IRQ_AFFINITY,
+			&desc);
 
 	if (ret < 0) {
 		ql_log(ql_log_fatal, vha, 0x00c7,
@@ -3431,17 +4735,15 @@ qla24xx_enable_msix(struct qla_hw_data *ha, struct rsp_que *rsp)
 		    ha->msix_count, ret);
 		goto msix_out;
 	} else if (ret < ha->msix_count) {
-		ql_log(ql_log_warn, vha, 0x00c6,
-		    "MSI-X: Failed to enable support "
-		     "with %d vectors, using %d vectors.\n",
-		    ha->msix_count, ret);
+		ql_log(ql_log_info, vha, 0x00c6,
+		    "MSI-X: Using %d vectors\n", ret);
 		ha->msix_count = ret;
 		/* Recalculate queue values */
 		if (ha->mqiobase && (ql2xmqsupport || ql2xnvmeenable)) {
-			ha->max_req_queues = ha->msix_count - 1;
+			ha->max_req_queues = qla_calc_queue_count(ha->msix_count);
 
 			/* ATIOQ needs 1 vector. That's 1 less QPair */
-			if (QLA_TGT_MODE_ENABLED())
+			if (QLA_TGT_MODE_ENABLED() && ha->max_req_queues > 1)
 				ha->max_req_queues--;
 
 			ha->max_rsp_queues = ha->max_req_queues;
@@ -3451,19 +4753,20 @@ qla24xx_enable_msix(struct qla_hw_data *ha, struct rsp_que *rsp)
 			    "Adjusted Max no of queues pairs: %d.\n", ha->max_qpairs);
 		}
 	}
-	ha->msix_entries = kzalloc(sizeof(struct qla_msix_entry) *
-				ha->msix_count, GFP_KERNEL);
+	vha->irq_offset = desc.pre_vectors;
+	ha->msix_entries = kzalloc_objs(struct qla_msix_entry, ha->msix_count);
 	if (!ha->msix_entries) {
 		ql_log(ql_log_fatal, vha, 0x00c8,
 		    "Failed to allocate memory for ha->msix_entries.\n");
 		ret = -ENOMEM;
-		goto msix_out;
+		goto free_irqs;
 	}
 	ha->flags.msix_enabled = 1;
 
 	for (i = 0; i < ha->msix_count; i++) {
 		qentry = &ha->msix_entries[i];
 		qentry->vector = pci_irq_vector(ha->pdev, i);
+		qentry->vector_base0 = i;
 		qentry->entry = i;
 		qentry->have_irq = 0;
 		qentry->in_use = 0;
@@ -3521,16 +4824,12 @@ msix_register_fail:
 	}
 
 	/* Enable MSI-X vector for response queue update for queue 0 */
-	if (IS_QLA83XX(ha) || IS_QLA27XX(ha)) {
-		if (ha->msixbase && ha->mqiobase &&
-		    (ha->max_rsp_queues > 1 || ha->max_req_queues > 1 ||
-		     ql2xmqsupport))
-			ha->mqenable = 1;
-	} else
-		if (ha->mqiobase &&
-		    (ha->max_rsp_queues > 1 || ha->max_req_queues > 1 ||
-		     ql2xmqsupport))
-			ha->mqenable = 1;
+	if (IS_MQUE_CAPABLE(ha) &&
+	    (ha->msixbase && ha->mqiobase && ha->max_qpairs))
+		ha->mqenable = 1;
+	else
+		ha->mqenable = 0;
+
 	ql_dbg(ql_dbg_multiq, vha, 0xc005,
 	    "mqiobase=%p, max_rsp_queues=%d, max_req_queues=%d.\n",
 	    ha->mqiobase, ha->max_rsp_queues, ha->max_req_queues);
@@ -3540,6 +4839,10 @@ msix_register_fail:
 
 msix_out:
 	return ret;
+
+free_irqs:
+	pci_free_irq_vectors(ha->pdev);
+	goto msix_out;
 }
 
 int
@@ -3552,7 +4855,8 @@ qla2x00_request_irqs(struct qla_hw_data *ha, struct rsp_que *rsp)
 	/* If possible, enable MSI-X. */
 	if (ql2xenablemsix == 0 || (!IS_QLA2432(ha) && !IS_QLA2532(ha) &&
 	    !IS_QLA8432(ha) && !IS_CNA_CAPABLE(ha) && !IS_QLA2031(ha) &&
-	    !IS_QLAFX00(ha) && !IS_QLA27XX(ha)))
+	    !IS_QLAFX00(ha) && !IS_QLA27XX(ha) && !IS_QLA28XX(ha) &&
+	    !IS_QLA29XX(ha)))
 		goto skip_msi;
 
 	if (ql2xenablemsix == 2)
@@ -3587,21 +4891,21 @@ qla2x00_request_irqs(struct qla_hw_data *ha, struct rsp_que *rsp)
 skip_msix:
 
 	ql_log(ql_log_info, vha, 0x0037,
-	    "Falling back-to MSI mode -%d.\n", ret);
+	    "Falling back-to MSI mode -- ret=%d.\n", ret);
 
 	if (!IS_QLA24XX(ha) && !IS_QLA2532(ha) && !IS_QLA8432(ha) &&
 	    !IS_QLA8001(ha) && !IS_P3P_TYPE(ha) && !IS_QLAFX00(ha) &&
-	    !IS_QLA27XX(ha))
+	    !IS_QLA27XX(ha) && !IS_QLA28XX(ha) && !IS_QLA29XX(ha))
 		goto skip_msi;
 
 	ret = pci_alloc_irq_vectors(ha->pdev, 1, 1, PCI_IRQ_MSI);
-	if (!ret) {
+	if (ret > 0) {
 		ql_dbg(ql_dbg_init, vha, 0x0038,
 		    "MSI: Enabled.\n");
 		ha->flags.msi_enabled = 1;
 	} else
 		ql_log(ql_log_warn, vha, 0x0039,
-		    "Falling back-to INTa mode -- %d.\n", ret);
+		    "Falling back-to INTa mode -- ret=%d.\n", ret);
 skip_msi:
 
 	/* Skip INTx on ISP82xx. */
@@ -3620,6 +4924,8 @@ skip_msi:
 		ql_dbg(ql_dbg_init, vha, 0x0125,
 		    "INTa mode: Enabled.\n");
 		ha->flags.mr_intr_valid = 1;
+		/* Set max_qpair to 0, as MSI-X and MSI in not enabled */
+		ha->max_qpairs = 0;
 	}
 
 clear_risc_ints:
@@ -3627,7 +4933,7 @@ clear_risc_ints:
 		goto fail;
 
 	spin_lock_irq(&ha->hardware_lock);
-	WRT_REG_WORD(&reg->isp.semaphore, 0);
+	wrt_reg_word(&reg->isp.semaphore, 0);
 	spin_unlock_irq(&ha->hardware_lock);
 
 fail:
@@ -3672,9 +4978,10 @@ free_irqs:
 }
 
 int qla25xx_request_irq(struct qla_hw_data *ha, struct qla_qpair *qpair,
-	struct qla_msix_entry *msix, int vector_type)
+	struct qla_msix_entry *msix)
 {
-	const struct qla_init_msix_entry *intr = &msix_entries[vector_type];
+	const struct qla_init_msix_entry *intr =
+		&msix_entries[QLA_MSIX_QPAIR_MULTIQ_RSP_Q];
 	scsi_qla_host_t *vha = pci_get_drvdata(ha->pdev);
 	int ret;
 
@@ -3689,5 +4996,6 @@ int qla25xx_request_irq(struct qla_hw_data *ha, struct qla_qpair *qpair,
 	}
 	msix->have_irq = 1;
 	msix->handle = qpair;
+	qla_mapq_init_qp_cpu_map(ha, msix, qpair);
 	return ret;
 }

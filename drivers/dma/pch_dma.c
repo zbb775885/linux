@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Topcliff PCH DMA controller driver
  * Copyright (c) 2010 Intel Corporation
  * Copyright (C) 2011 LAPIS Semiconductor Co., Ltd.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/dmaengine.h>
@@ -158,16 +150,6 @@ static inline struct pch_dma *to_pd(struct dma_device *ddev)
 	return container_of(ddev, struct pch_dma, dma);
 }
 
-static inline struct device *chan2dev(struct dma_chan *chan)
-{
-	return &chan->dev->device;
-}
-
-static inline struct device *chan2parent(struct dma_chan *chan)
-{
-	return chan->dev->device.parent;
-}
-
 static inline
 struct pch_dma_desc *pdc_first_active(struct pch_dma_chan *pd_chan)
 {
@@ -202,7 +184,7 @@ static void pdc_enable_irq(struct dma_chan *chan, int enable)
 
 	dma_writel(pd, CTL2, val);
 
-	dev_dbg(chan2dev(chan), "pdc_enable_irq: chan %d -> %x\n",
+	dev_dbg(dmaengine_chan_dev(chan), "pdc_enable_irq: chan %d -> %x\n",
 		chan->chan_id, val);
 }
 
@@ -250,7 +232,7 @@ static void pdc_set_dir(struct dma_chan *chan)
 		dma_writel(pd, CTL3, val);
 	}
 
-	dev_dbg(chan2dev(chan), "pdc_set_dir: chan %d -> %x\n",
+	dev_dbg(dmaengine_chan_dev(chan), "pdc_set_dir: chan %d -> %x\n",
 		chan->chan_id, val);
 }
 
@@ -284,7 +266,7 @@ static void pdc_set_mode(struct dma_chan *chan, u32 mode)
 		dma_writel(pd, CTL3, val);
 	}
 
-	dev_dbg(chan2dev(chan), "pdc_set_mode: chan %d -> %x\n",
+	dev_dbg(dmaengine_chan_dev(chan), "pdc_set_mode: chan %d -> %x\n",
 		chan->chan_id, val);
 }
 
@@ -327,18 +309,18 @@ static bool pdc_is_idle(struct pch_dma_chan *pd_chan)
 static void pdc_dostart(struct pch_dma_chan *pd_chan, struct pch_dma_desc* desc)
 {
 	if (!pdc_is_idle(pd_chan)) {
-		dev_err(chan2dev(&pd_chan->chan),
+		dev_err(dmaengine_chan_dev(&pd_chan->chan),
 			"BUG: Attempt to start non-idle channel\n");
 		return;
 	}
 
-	dev_dbg(chan2dev(&pd_chan->chan), "chan %d -> dev_addr: %x\n",
+	dev_dbg(dmaengine_chan_dev(&pd_chan->chan), "chan %d -> dev_addr: %x\n",
 		pd_chan->chan.chan_id, desc->regs.dev_addr);
-	dev_dbg(chan2dev(&pd_chan->chan), "chan %d -> mem_addr: %x\n",
+	dev_dbg(dmaengine_chan_dev(&pd_chan->chan), "chan %d -> mem_addr: %x\n",
 		pd_chan->chan.chan_id, desc->regs.mem_addr);
-	dev_dbg(chan2dev(&pd_chan->chan), "chan %d -> size: %x\n",
+	dev_dbg(dmaengine_chan_dev(&pd_chan->chan), "chan %d -> size: %x\n",
 		pd_chan->chan.chan_id, desc->regs.size);
-	dev_dbg(chan2dev(&pd_chan->chan), "chan %d -> next: %x\n",
+	dev_dbg(dmaengine_chan_dev(&pd_chan->chan), "chan %d -> next: %x\n",
 		pd_chan->chan.chan_id, desc->regs.next);
 
 	if (list_empty(&desc->tx_list)) {
@@ -395,8 +377,8 @@ static void pdc_handle_error(struct pch_dma_chan *pd_chan)
 	if (!list_empty(&pd_chan->active_list))
 		pdc_dostart(pd_chan, pdc_first_active(pd_chan));
 
-	dev_crit(chan2dev(&pd_chan->chan), "Bad descriptor submitted\n");
-	dev_crit(chan2dev(&pd_chan->chan), "descriptor cookie: %d\n",
+	dev_crit(dmaengine_chan_dev(&pd_chan->chan), "Bad descriptor submitted\n");
+	dev_crit(dmaengine_chan_dev(&pd_chan->chan), "descriptor cookie: %d\n",
 		 bad_desc->txd.cookie);
 
 	pdc_chain_complete(pd_chan, bad_desc);
@@ -463,10 +445,10 @@ static struct pch_dma_desc *pdc_desc_get(struct pch_dma_chan *pd_chan)
 			ret = desc;
 			break;
 		}
-		dev_dbg(chan2dev(&pd_chan->chan), "desc %p not ACKed\n", desc);
+		dev_dbg(dmaengine_chan_dev(&pd_chan->chan), "desc %p not ACKed\n", desc);
 	}
 	spin_unlock(&pd_chan->lock);
-	dev_dbg(chan2dev(&pd_chan->chan), "scanned %d descriptors\n", i);
+	dev_dbg(dmaengine_chan_dev(&pd_chan->chan), "scanned %d descriptors\n", i);
 
 	if (!ret) {
 		ret = pdc_alloc_desc(&pd_chan->chan, GFP_ATOMIC);
@@ -475,7 +457,7 @@ static struct pch_dma_desc *pdc_desc_get(struct pch_dma_chan *pd_chan)
 			pd_chan->descs_allocated++;
 			spin_unlock(&pd_chan->lock);
 		} else {
-			dev_err(chan2dev(&pd_chan->chan),
+			dev_err(dmaengine_chan_dev(&pd_chan->chan),
 				"failed to alloc desc\n");
 		}
 	}
@@ -502,7 +484,7 @@ static int pd_alloc_chan_resources(struct dma_chan *chan)
 	int i;
 
 	if (!pdc_is_idle(pd_chan)) {
-		dev_dbg(chan2dev(chan), "DMA channel not idle ?\n");
+		dev_dbg(dmaengine_chan_dev(chan), "DMA channel not idle ?\n");
 		return -EIO;
 	}
 
@@ -513,7 +495,7 @@ static int pd_alloc_chan_resources(struct dma_chan *chan)
 		desc = pdc_alloc_desc(chan, GFP_KERNEL);
 
 		if (!desc) {
-			dev_warn(chan2dev(chan),
+			dev_warn(dmaengine_chan_dev(chan),
 				"Only allocated %d initial descriptors\n", i);
 			break;
 		}
@@ -586,7 +568,7 @@ static struct dma_async_tx_descriptor *pd_prep_slave_sg(struct dma_chan *chan,
 	int i;
 
 	if (unlikely(!sg_len)) {
-		dev_info(chan2dev(chan), "prep_slave_sg: length is zero!\n");
+		dev_info(dmaengine_chan_dev(chan), "prep_slave_sg: length is zero!\n");
 		return NULL;
 	}
 
@@ -652,7 +634,7 @@ static struct dma_async_tx_descriptor *pd_prep_slave_sg(struct dma_chan *chan,
 	return &first->txd;
 
 err_desc_get:
-	dev_err(chan2dev(chan), "failed to get desc or wrong parameters\n");
+	dev_err(dmaengine_chan_dev(chan), "failed to get desc or wrong parameters\n");
 	pdc_desc_put(pd_chan, first);
 	return NULL;
 }
@@ -678,13 +660,13 @@ static int pd_device_terminate_all(struct dma_chan *chan)
 	return 0;
 }
 
-static void pdc_tasklet(unsigned long data)
+static void pdc_tasklet(struct tasklet_struct *t)
 {
-	struct pch_dma_chan *pd_chan = (struct pch_dma_chan *)data;
+	struct pch_dma_chan *pd_chan = from_tasklet(pd_chan, t, tasklet);
 	unsigned long flags;
 
 	if (!pdc_is_idle(pd_chan)) {
-		dev_err(chan2dev(&pd_chan->chan),
+		dev_err(dmaengine_chan_dev(&pd_chan->chan),
 			"BUG: handle non-idle channel in tasklet\n");
 		return;
 	}
@@ -743,8 +725,7 @@ static irqreturn_t pd_irq(int irq, void *devid)
 	return ret0 | ret2;
 }
 
-#ifdef	CONFIG_PM
-static void pch_dma_save_regs(struct pch_dma *pd)
+static void __maybe_unused pch_dma_save_regs(struct pch_dma *pd)
 {
 	struct pch_dma_chan *pd_chan;
 	struct dma_chan *chan, *_c;
@@ -767,7 +748,7 @@ static void pch_dma_save_regs(struct pch_dma *pd)
 	}
 }
 
-static void pch_dma_restore_regs(struct pch_dma *pd)
+static void __maybe_unused pch_dma_restore_regs(struct pch_dma *pd)
 {
 	struct pch_dma_chan *pd_chan;
 	struct dma_chan *chan, *_c;
@@ -790,40 +771,25 @@ static void pch_dma_restore_regs(struct pch_dma *pd)
 	}
 }
 
-static int pch_dma_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused pch_dma_suspend(struct device *dev)
 {
-	struct pch_dma *pd = pci_get_drvdata(pdev);
+	struct pch_dma *pd = dev_get_drvdata(dev);
 
 	if (pd)
 		pch_dma_save_regs(pd);
 
-	pci_save_state(pdev);
-	pci_disable_device(pdev);
-	pci_set_power_state(pdev, pci_choose_state(pdev, state));
-
 	return 0;
 }
 
-static int pch_dma_resume(struct pci_dev *pdev)
+static int __maybe_unused pch_dma_resume(struct device *dev)
 {
-	struct pch_dma *pd = pci_get_drvdata(pdev);
-	int err;
-
-	pci_set_power_state(pdev, PCI_D0);
-	pci_restore_state(pdev);
-
-	err = pci_enable_device(pdev);
-	if (err) {
-		dev_dbg(&pdev->dev, "failed to enable device\n");
-		return err;
-	}
+	struct pch_dma *pd = dev_get_drvdata(dev);
 
 	if (pd)
 		pch_dma_restore_regs(pd);
 
 	return 0;
 }
-#endif
 
 static int pch_dma_probe(struct pci_dev *pdev,
 				   const struct pci_device_id *id)
@@ -835,7 +801,7 @@ static int pch_dma_probe(struct pci_dev *pdev,
 	int i;
 
 	nr_channels = id->driver_data;
-	pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+	pd = kzalloc_obj(*pd);
 	if (!pd)
 		return -ENOMEM;
 
@@ -859,7 +825,7 @@ static int pch_dma_probe(struct pci_dev *pdev,
 		goto err_disable_pdev;
 	}
 
-	err = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
+	err = dma_set_mask(&pdev->dev, DMA_BIT_MASK(32));
 	if (err) {
 		dev_err(&pdev->dev, "Cannot set proper DMA config\n");
 		goto err_free_res;
@@ -873,6 +839,7 @@ static int pch_dma_probe(struct pci_dev *pdev,
 	}
 
 	pci_set_master(pdev);
+	pd->dma.dev = &pdev->dev;
 
 	err = request_irq(pdev->irq, pd_irq, IRQF_SHARED, DRV_NAME, pd);
 	if (err) {
@@ -888,7 +855,6 @@ static int pch_dma_probe(struct pci_dev *pdev,
 		goto err_free_irq;
 	}
 
-	pd->dma.dev = &pdev->dev;
 
 	INIT_LIST_HEAD(&pd->dma.channels);
 
@@ -906,8 +872,7 @@ static int pch_dma_probe(struct pci_dev *pdev,
 		INIT_LIST_HEAD(&pd_chan->queue);
 		INIT_LIST_HEAD(&pd_chan->free_list);
 
-		tasklet_init(&pd_chan->tasklet, pdc_tasklet,
-			     (unsigned long)pd_chan);
+		tasklet_setup(&pd_chan->tasklet, pdc_tasklet);
 		list_add_tail(&pd_chan->chan.device_node, &pd->dma.channels);
 	}
 
@@ -972,7 +937,6 @@ static void pch_dma_remove(struct pci_dev *pdev)
 }
 
 /* PCI Device ID of DMA device */
-#define PCI_VENDOR_ID_ROHM             0x10DB
 #define PCI_DEVICE_ID_EG20T_PCH_DMA_8CH        0x8810
 #define PCI_DEVICE_ID_EG20T_PCH_DMA_4CH        0x8815
 #define PCI_DEVICE_ID_ML7213_DMA1_8CH	0x8026
@@ -1001,16 +965,16 @@ static const struct pci_device_id pch_dma_id_table[] = {
 	{ PCI_VDEVICE(ROHM, PCI_DEVICE_ID_ML7831_DMA2_4CH), 4}, /* SPI */
 	{ 0, },
 };
+MODULE_DEVICE_TABLE(pci, pch_dma_id_table);
+
+static SIMPLE_DEV_PM_OPS(pch_dma_pm_ops, pch_dma_suspend, pch_dma_resume);
 
 static struct pci_driver pch_dma_driver = {
 	.name		= DRV_NAME,
 	.id_table	= pch_dma_id_table,
 	.probe		= pch_dma_probe,
 	.remove		= pch_dma_remove,
-#ifdef CONFIG_PM
-	.suspend	= pch_dma_suspend,
-	.resume		= pch_dma_resume,
-#endif
+	.driver.pm	= &pch_dma_pm_ops,
 };
 
 module_pci_driver(pch_dma_driver);
@@ -1019,4 +983,3 @@ MODULE_DESCRIPTION("Intel EG20T PCH / LAPIS Semicon ML7213/ML7223/ML7831 IOH "
 		   "DMA controller driver");
 MODULE_AUTHOR("Yong Wang <yong.y.wang@intel.com>");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(pci, pch_dma_id_table);

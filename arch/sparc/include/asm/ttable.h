@@ -5,7 +5,7 @@
 #include <asm/utrap.h>
 #include <asm/pil.h>
 
-#ifdef __ASSEMBLY__
+#ifdef __ASSEMBLER__
 #include <asm/thread_info.h>
 #endif
 
@@ -217,6 +217,16 @@
 	ba,pt	%xcc, sun4v_dtsb_miss;			\
 	 nop;						\
 	nop;						\
+	nop;
+
+#define SUN4V_MCD_PRECISE				\
+	ldxa	[%g0] ASI_SCRATCHPAD, %g2;		\
+	ldx	[%g2 + HV_FAULT_D_ADDR_OFFSET], %g4;	\
+	ldx	[%g2 + HV_FAULT_D_CTX_OFFSET], %g5;	\
+	ba,pt	%xcc, etrap;				\
+	 rd	%pc, %g7;				\
+	ba,pt	%xcc, sun4v_mcd_detect_precise;		\
+	 nop;						\
 	nop;
 
 /* Before touching these macros, you owe it to yourself to go and

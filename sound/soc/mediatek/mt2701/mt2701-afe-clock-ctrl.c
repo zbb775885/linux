@@ -1,17 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * mt2701-afe-clock-ctrl.c  --  Mediatek 2701 afe clock ctrl
  *
  * Copyright (c) 2016 MediaTek Inc.
  * Author: Garlic Tseng <garlic.tseng@mediatek.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ *	   Ryder Lee <ryder.lee@mediatek.com>
  */
 
 #include "mt2701-afe-common.h"
@@ -32,80 +25,98 @@ static const char *const base_clks[] = {
 int mt2701_init_clock(struct mtk_base_afe *afe)
 {
 	struct mt2701_afe_private *afe_priv = afe->platform_priv;
+	int i2s_num;
 	int i;
 
 	for (i = 0; i < MT2701_BASE_CLK_NUM; i++) {
 		afe_priv->base_ck[i] = devm_clk_get(afe->dev, base_clks[i]);
-		if (IS_ERR(afe_priv->base_ck[i])) {
-			dev_err(afe->dev, "failed to get %s\n", base_clks[i]);
-			return PTR_ERR(afe_priv->base_ck[i]);
-		}
+		if (IS_ERR(afe_priv->base_ck[i]))
+			return dev_err_probe(afe->dev, PTR_ERR(afe_priv->base_ck[i]),
+					     "failed to get %s\n", base_clks[i]);
 	}
 
+	i2s_num = min(afe_priv->soc->i2s_num, MT2701_BASE_CLK_NUM);
 	/* Get I2S related clocks */
-	for (i = 0; i < MT2701_I2S_NUM; i++) {
+	for (i = 0; i < i2s_num; i++) {
 		struct mt2701_i2s_path *i2s_path = &afe_priv->i2s_path[i];
+		struct clk *i2s_ck;
 		char name[13];
 
 		snprintf(name, sizeof(name), "i2s%d_src_sel", i);
 		i2s_path->sel_ck = devm_clk_get(afe->dev, name);
-		if (IS_ERR(i2s_path->sel_ck)) {
-			dev_err(afe->dev, "failed to get %s\n", name);
-			return PTR_ERR(i2s_path->sel_ck);
-		}
+		if (IS_ERR(i2s_path->sel_ck))
+			return dev_err_probe(afe->dev, PTR_ERR(i2s_path->sel_ck),
+					     "failed to get %s\n", name);
 
 		snprintf(name, sizeof(name), "i2s%d_src_div", i);
 		i2s_path->div_ck = devm_clk_get(afe->dev, name);
-		if (IS_ERR(i2s_path->div_ck)) {
-			dev_err(afe->dev, "failed to get %s\n", name);
-			return PTR_ERR(i2s_path->div_ck);
-		}
+		if (IS_ERR(i2s_path->div_ck))
+			return dev_err_probe(afe->dev, PTR_ERR(i2s_path->div_ck),
+					     "failed to get %s\n", name);
 
 		snprintf(name, sizeof(name), "i2s%d_mclk_en", i);
 		i2s_path->mclk_ck = devm_clk_get(afe->dev, name);
-		if (IS_ERR(i2s_path->mclk_ck)) {
-			dev_err(afe->dev, "failed to get %s\n", name);
-			return PTR_ERR(i2s_path->mclk_ck);
-		}
+		if (IS_ERR(i2s_path->mclk_ck))
+			return dev_err_probe(afe->dev, PTR_ERR(i2s_path->mclk_ck),
+				       "failed to get %s\n", name);
 
 		snprintf(name, sizeof(name), "i2so%d_hop_ck", i);
-		i2s_path->hop_ck[I2S_OUT] = devm_clk_get(afe->dev, name);
-		if (IS_ERR(i2s_path->hop_ck[I2S_OUT])) {
-			dev_err(afe->dev, "failed to get %s\n", name);
-			return PTR_ERR(i2s_path->hop_ck[I2S_OUT]);
-		}
+		i2s_ck = devm_clk_get(afe->dev, name);
+		if (IS_ERR(i2s_ck))
+			return dev_err_probe(afe->dev, PTR_ERR(i2s_ck),
+					     "failed to get %s\n", name);
+
+		i2s_path->hop_ck[SNDRV_PCM_STREAM_PLAYBACK] = i2s_ck;
 
 		snprintf(name, sizeof(name), "i2si%d_hop_ck", i);
-		i2s_path->hop_ck[I2S_IN] = devm_clk_get(afe->dev, name);
-		if (IS_ERR(i2s_path->hop_ck[I2S_IN])) {
-			dev_err(afe->dev, "failed to get %s\n", name);
-			return PTR_ERR(i2s_path->hop_ck[I2S_IN]);
-		}
+		i2s_ck = devm_clk_get(afe->dev, name);
+		if (IS_ERR(i2s_ck))
+			return dev_err_probe(afe->dev, PTR_ERR(i2s_ck),
+					     "failed to get %s\n", name);
+
+		i2s_path->hop_ck[SNDRV_PCM_STREAM_CAPTURE] = i2s_ck;
 
 		snprintf(name, sizeof(name), "asrc%d_out_ck", i);
 		i2s_path->asrco_ck = devm_clk_get(afe->dev, name);
-		if (IS_ERR(i2s_path->asrco_ck)) {
-			dev_err(afe->dev, "failed to get %s\n", name);
-			return PTR_ERR(i2s_path->asrco_ck);
-		}
+		if (IS_ERR(i2s_path->asrco_ck))
+			return dev_err_probe(afe->dev, PTR_ERR(i2s_path->asrco_ck),
+					     "failed to get %s\n", name);
 	}
 
 	/* Some platforms may support BT path */
-	afe_priv->mrgif_ck = devm_clk_get(afe->dev, "audio_mrgif_pd");
-	if (IS_ERR(afe_priv->mrgif_ck)) {
-		if (PTR_ERR(afe_priv->mrgif_ck) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
+	afe_priv->mrgif_ck = devm_clk_get_optional(afe->dev, "audio_mrgif_pd");
+	if (IS_ERR(afe_priv->mrgif_ck))
+		return PTR_ERR(afe_priv->mrgif_ck);
 
-		afe_priv->mrgif_ck = NULL;
-	}
+	/*
+	 * Optional HDMI audio clocks. Platforms that do not wire up the
+	 * HDMI output (e.g. MT2701 devkits using only the I2S BE DAIs)
+	 * may omit these; in that case the HDMI BE DAI simply cannot be
+	 * enabled, but the rest of the AFE still probes.
+	 */
+	afe_priv->hadds2pll_ck = devm_clk_get_optional(afe->dev, "hadds2pll_294m");
+	if (IS_ERR(afe_priv->hadds2pll_ck))
+		return PTR_ERR(afe_priv->hadds2pll_ck);
+
+	afe_priv->audio_hdmi_ck = devm_clk_get_optional(afe->dev, "audio_hdmi_pd");
+	if (IS_ERR(afe_priv->audio_hdmi_ck))
+		return PTR_ERR(afe_priv->audio_hdmi_ck);
+
+	afe_priv->audio_spdf_ck = devm_clk_get_optional(afe->dev, "audio_spdf_pd");
+	if (IS_ERR(afe_priv->audio_spdf_ck))
+		return PTR_ERR(afe_priv->audio_spdf_ck);
+
+	afe_priv->audio_apll_ck = devm_clk_get_optional(afe->dev, "audio_apll_pd");
+	if (IS_ERR(afe_priv->audio_apll_ck))
+		return PTR_ERR(afe_priv->audio_apll_ck);
 
 	return 0;
 }
 
-int mt2701_afe_enable_i2s(struct mtk_base_afe *afe, int id, int dir)
+int mt2701_afe_enable_i2s(struct mtk_base_afe *afe,
+			  struct mt2701_i2s_path *i2s_path,
+			  int dir)
 {
-	struct mt2701_afe_private *afe_priv = afe->platform_priv;
-	struct mt2701_i2s_path *i2s_path = &afe_priv->i2s_path[id];
 	int ret;
 
 	ret = clk_prepare_enable(i2s_path->asrco_ck);
@@ -128,11 +139,10 @@ err_hop_ck:
 	return ret;
 }
 
-void mt2701_afe_disable_i2s(struct mtk_base_afe *afe, int id, int dir)
+void mt2701_afe_disable_i2s(struct mtk_base_afe *afe,
+			    struct mt2701_i2s_path *i2s_path,
+			    int dir)
 {
-	struct mt2701_afe_private *afe_priv = afe->platform_priv;
-	struct mt2701_i2s_path *i2s_path = &afe_priv->i2s_path[id];
-
 	clk_disable_unprepare(i2s_path->hop_ck[dir]);
 	clk_disable_unprepare(i2s_path->asrco_ck);
 }
@@ -272,27 +282,32 @@ int mt2701_afe_disable_clock(struct mtk_base_afe *afe)
 	return 0;
 }
 
-void mt2701_mclk_configuration(struct mtk_base_afe *afe, int id, int domain,
-			       int mclk)
+int mt2701_mclk_configuration(struct mtk_base_afe *afe, int id)
+
 {
 	struct mt2701_afe_private *priv = afe->platform_priv;
 	struct mt2701_i2s_path *i2s_path = &priv->i2s_path[id];
-	int ret;
+	int ret = -EINVAL;
 
 	/* Set mclk source */
-	if (domain == 0)
+	if (!(MT2701_PLL_DOMAIN_0_RATE % i2s_path->mclk_rate))
 		ret = clk_set_parent(i2s_path->sel_ck,
 				     priv->base_ck[MT2701_TOP_AUD_MCLK_SRC0]);
-	else
+	else if (!(MT2701_PLL_DOMAIN_1_RATE % i2s_path->mclk_rate))
 		ret = clk_set_parent(i2s_path->sel_ck,
 				     priv->base_ck[MT2701_TOP_AUD_MCLK_SRC1]);
 
-	if (ret)
-		dev_err(afe->dev, "failed to set domain%d mclk source %d\n",
-			domain, ret);
+	if (ret) {
+		dev_err(afe->dev, "failed to set mclk source\n");
+		return ret;
+	}
 
 	/* Set mclk divider */
-	ret = clk_set_rate(i2s_path->div_ck, mclk);
-	if (ret)
+	ret = clk_set_rate(i2s_path->div_ck, i2s_path->mclk_rate);
+	if (ret) {
 		dev_err(afe->dev, "failed to set mclk divider %d\n", ret);
+		return ret;
+	}
+
+	return 0;
 }

@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * System monitoring driver for DA9055 PMICs.
  *
  * Copyright(c) 2012 Dialog Semiconductor Ltd.
  *
  * Author: David Dajun Chen <dchen@diasemi.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  */
 
@@ -19,6 +15,7 @@
 #include <linux/platform_device.h>
 #include <linux/watchdog.h>
 #include <linux/delay.h>
+#include <linux/stringify.h>
 
 #include <linux/mfd/da9055/core.h>
 #include <linux/mfd/da9055/reg.h>
@@ -27,7 +24,7 @@ static bool nowayout = WATCHDOG_NOWAYOUT;
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout,
 		 "Watchdog cannot be stopped once started (default="
-		 __MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+		 __stringify(WATCHDOG_NOWAYOUT) ")");
 
 #define DA9055_DEF_TIMEOUT	4
 #define DA9055_TWDMIN		256
@@ -123,13 +120,13 @@ static const struct watchdog_ops da9055_wdt_ops = {
 
 static int da9055_wdt_probe(struct platform_device *pdev)
 {
-	struct da9055 *da9055 = dev_get_drvdata(pdev->dev.parent);
+	struct device *dev = &pdev->dev;
+	struct da9055 *da9055 = dev_get_drvdata(dev->parent);
 	struct da9055_wdt_data *driver_data;
 	struct watchdog_device *da9055_wdt;
 	int ret;
 
-	driver_data = devm_kzalloc(&pdev->dev, sizeof(*driver_data),
-				   GFP_KERNEL);
+	driver_data = devm_kzalloc(dev, sizeof(*driver_data), GFP_KERNEL);
 	if (!driver_data)
 		return -ENOMEM;
 
@@ -140,22 +137,17 @@ static int da9055_wdt_probe(struct platform_device *pdev)
 	da9055_wdt->timeout = DA9055_DEF_TIMEOUT;
 	da9055_wdt->info = &da9055_wdt_info;
 	da9055_wdt->ops = &da9055_wdt_ops;
-	da9055_wdt->parent = &pdev->dev;
+	da9055_wdt->parent = dev;
 	watchdog_set_nowayout(da9055_wdt, nowayout);
 	watchdog_set_drvdata(da9055_wdt, driver_data);
 
 	ret = da9055_wdt_stop(da9055_wdt);
 	if (ret < 0) {
-		dev_err(&pdev->dev, "Failed to stop watchdog, %d\n", ret);
+		dev_err(dev, "Failed to stop watchdog, %d\n", ret);
 		return ret;
 	}
 
-	ret = devm_watchdog_register_device(&pdev->dev, &driver_data->wdt);
-	if (ret != 0)
-		dev_err(da9055->dev, "watchdog_register_device() failed: %d\n",
-			ret);
-
-	return ret;
+	return devm_watchdog_register_device(dev, &driver_data->wdt);
 }
 
 static struct platform_driver da9055_wdt_driver = {

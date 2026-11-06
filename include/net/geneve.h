@@ -4,6 +4,8 @@
 
 #include <net/udp_tunnel.h>
 
+#define GENEVE_UDP_PORT		6081
+
 /* Geneve Header:
  *  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
  *  |Ver|  Opt Len  |O|C|    Rsvd.  |          Protocol Type        |
@@ -57,12 +59,13 @@ struct genevehdr {
 	__be16 proto_type;
 	u8 vni[3];
 	u8 rsvd2;
-	struct geneve_opt options[];
+	u8 options[];
 };
 
-#ifdef CONFIG_INET
-struct net_device *geneve_dev_create_fb(struct net *net, const char *name,
-					u8 name_assign_type, u16 dst_port);
-#endif /*ifdef CONFIG_INET */
+static inline bool netif_is_geneve(const struct net_device *dev)
+{
+	return dev->rtnl_link_ops &&
+	       !strcmp(dev->rtnl_link_ops->kind, "geneve");
+}
 
 #endif /*ifdef__NET_GENEVE_H */

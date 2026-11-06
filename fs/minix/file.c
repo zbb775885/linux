@@ -7,6 +7,7 @@
  *  minix regular file handling primitives
  */
 
+#include <linux/buffer_head.h>
 #include "minix.h"
 
 /*
@@ -17,17 +18,18 @@ const struct file_operations minix_file_operations = {
 	.llseek		= generic_file_llseek,
 	.read_iter	= generic_file_read_iter,
 	.write_iter	= generic_file_write_iter,
-	.mmap		= generic_file_mmap,
-	.fsync		= generic_file_fsync,
-	.splice_read	= generic_file_splice_read,
+	.mmap_prepare	= generic_file_mmap_prepare,
+	.fsync		= simple_fsync,
+	.splice_read	= filemap_splice_read,
 };
 
-static int minix_setattr(struct dentry *dentry, struct iattr *attr)
+static int minix_setattr(const struct mnt_idmap *idmap,
+			 struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
 	int error;
 
-	error = setattr_prepare(dentry, attr);
+	error = setattr_prepare(&nop_mnt_idmap, dentry, attr);
 	if (error)
 		return error;
 
@@ -41,7 +43,7 @@ static int minix_setattr(struct dentry *dentry, struct iattr *attr)
 		minix_truncate(inode);
 	}
 
-	setattr_copy(inode, attr);
+	setattr_copy(&nop_mnt_idmap, inode, attr);
 	mark_inode_dirty(inode);
 	return 0;
 }

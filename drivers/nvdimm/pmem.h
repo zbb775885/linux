@@ -2,9 +2,11 @@
 #ifndef __NVDIMM_PMEM_H__
 #define __NVDIMM_PMEM_H__
 #include <linux/badblocks.h>
+#include <linux/memremap.h>
 #include <linux/types.h>
-#include <linux/pfn_t.h>
 #include <linux/fs.h>
+
+enum dax_access_mode;
 
 /* this definition is in it's own header for tools/testing/nvdimm to consume */
 struct pmem_device {
@@ -12,7 +14,6 @@ struct pmem_device {
 	phys_addr_t		phys_addr;
 	/* when non-zero this device is hosting a 'pfn' instance */
 	phys_addr_t		data_offset;
-	u64			pfn_flags;
 	void			*virt_addr;
 	/* immutable base size of the namespace */
 	size_t			size;
@@ -26,5 +27,7 @@ struct pmem_device {
 };
 
 long __pmem_direct_access(struct pmem_device *pmem, pgoff_t pgoff,
-		long nr_pages, void **kaddr, pfn_t *pfn);
+		long nr_pages, enum dax_access_mode mode, void **kaddr,
+		unsigned long *pfn);
+
 #endif /* __NVDIMM_PMEM_H__ */

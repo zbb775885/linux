@@ -1,15 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * HID driver for Nintendo Wii / Wii U peripherals
  * Copyright (c) 2011-2013 David Herrmann <dh.herrmann@gmail.com>
  */
 
 /*
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  */
 
+#include <linux/cleanup.h>
 #include <linux/completion.h>
 #include <linux/device.h>
 #include <linux/hid.h>
@@ -365,13 +363,12 @@ void wiiproto_req_rmem(struct wiimote_data *wdata, bool eeprom, __u32 offset,
 int wiimote_cmd_write(struct wiimote_data *wdata, __u32 offset,
 						const __u8 *wmem, __u8 size)
 {
-	unsigned long flags;
 	int ret;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wiimote_cmd_set(wdata, WIIPROTO_REQ_WMEM, 0);
-	wiiproto_req_wreg(wdata, offset, wmem, size);
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock) {
+		wiimote_cmd_set(wdata, WIIPROTO_REQ_WMEM, 0);
+		wiiproto_req_wreg(wdata, offset, wmem, size);
+	}
 
 	ret = wiimote_cmd_wait(wdata);
 	if (!ret && wdata->state.cmd_err)
@@ -384,21 +381,19 @@ int wiimote_cmd_write(struct wiimote_data *wdata, __u32 offset,
 ssize_t wiimote_cmd_read(struct wiimote_data *wdata, __u32 offset, __u8 *rmem,
 								__u8 size)
 {
-	unsigned long flags;
 	ssize_t ret;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.cmd_read_size = size;
-	wdata->state.cmd_read_buf = rmem;
-	wiimote_cmd_set(wdata, WIIPROTO_REQ_RMEM, offset & 0xffff);
-	wiiproto_req_rreg(wdata, offset, size);
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock) {
+		wdata->state.cmd_read_size = size;
+		wdata->state.cmd_read_buf = rmem;
+		wiimote_cmd_set(wdata, WIIPROTO_REQ_RMEM, offset & 0xffff);
+		wiiproto_req_rreg(wdata, offset, size);
+	}
 
 	ret = wiimote_cmd_wait(wdata);
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.cmd_read_buf = NULL;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		wdata->state.cmd_read_buf = NULL;
 
 	if (!ret) {
 		if (wdata->state.cmd_read_size == 0)
@@ -455,6 +450,15 @@ static __u8 wiimote_cmd_read_ext(struct wiimote_data *wdata, __u8 *rmem)
 		return WIIMOTE_EXT_BALANCE_BOARD;
 	if (rmem[4] == 0x01 && rmem[5] == 0x20)
 		return WIIMOTE_EXT_PRO_CONTROLLER;
+	if (rmem[0] == 0x01 && rmem[1] == 0x00 &&
+	    rmem[4] == 0x01 && rmem[5] == 0x03)
+		return WIIMOTE_EXT_DRUMS;
+	if (rmem[0] == 0x00 && rmem[1] == 0x00 &&
+	    rmem[4] == 0x01 && rmem[5] == 0x03)
+		return WIIMOTE_EXT_GUITAR;
+	if (rmem[0] == 0x03 && rmem[1] == 0x00 &&
+	    rmem[4] == 0x01 && rmem[5] == 0x03)
+		return WIIMOTE_EXT_TURNTABLE;
 
 	return WIIMOTE_EXT_UNKNOWN;
 }
@@ -488,8 +492,11 @@ static bool wiimote_cmd_map_mp(struct wiimote_data *wdata, __u8 exttype)
 	/* map MP with correct pass-through mode */
 	switch (exttype) {
 	case WIIMOTE_EXT_CLASSIC_CONTROLLER:
+	case WIIMOTE_EXT_DRUMS:
+	case WIIMOTE_EXT_GUITAR:
 		wmem = 0x07;
 		break;
+	case WIIMOTE_EXT_TURNTABLE:
 	case WIIMOTE_EXT_NUNCHUK:
 		wmem = 0x05;
 		break;
@@ -612,6 +619,13 @@ static const __u8 * const wiimote_devtype_mods[WIIMOTE_DEV_NUM] = {
 	},
 };
 
+static const __u8 player_leds[] = {
+	WIIPROTO_FLAG_LED1,
+	WIIPROTO_FLAG_LED2,
+	WIIPROTO_FLAG_LED3,
+	WIIPROTO_FLAG_LED4
+};
+
 static void wiimote_modules_load(struct wiimote_data *wdata,
 				 unsigned int devtype)
 {
@@ -659,9 +673,13 @@ static void wiimote_modules_load(struct wiimote_data *wdata,
 			goto error;
 	}
 
-	spin_lock_irq(&wdata->state.lock);
-	wdata->state.devtype = devtype;
-	spin_unlock_irq(&wdata->state.lock);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock) {
+		wdata->state.devtype = devtype;
+		/* after loading modules, set the Player ID LED cycling the available LEDs*/
+		wiiproto_req_leds(wdata,
+		    player_leds[(wdata->player_id - 1U) % ARRAY_SIZE(player_leds)]);
+	}
+
 	return;
 
 error:
@@ -681,13 +699,11 @@ static void wiimote_modules_unload(struct wiimote_data *wdata)
 {
 	const __u8 *mods, *iter;
 	const struct wiimod_ops *ops;
-	unsigned long flags;
 
 	mods = wiimote_devtype_mods[wdata->state.devtype];
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.devtype = WIIMOTE_DEV_UNKNOWN;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		wdata->state.devtype = WIIMOTE_DEV_UNKNOWN;
 
 	/* find end of list */
 	for (iter = mods; *iter != WIIMOD_NULL; ++iter)
@@ -714,7 +730,6 @@ static void wiimote_modules_unload(struct wiimote_data *wdata)
 
 static void wiimote_ext_load(struct wiimote_data *wdata, unsigned int ext)
 {
-	unsigned long flags;
 	const struct wiimod_ops *ops;
 	int ret;
 
@@ -726,22 +741,20 @@ static void wiimote_ext_load(struct wiimote_data *wdata, unsigned int ext)
 			ext = WIIMOTE_EXT_UNKNOWN;
 	}
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.exttype = ext;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		wdata->state.exttype = ext;
 }
 
 static void wiimote_ext_unload(struct wiimote_data *wdata)
 {
-	unsigned long flags;
 	const struct wiimod_ops *ops;
 
 	ops = wiimod_ext_table[wdata->state.exttype];
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.exttype = WIIMOTE_EXT_UNKNOWN;
-	wdata->state.flags &= ~WIIPROTO_FLAG_EXT_USED;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock) {
+		wdata->state.exttype = WIIMOTE_EXT_UNKNOWN;
+		wdata->state.flags &= ~WIIPROTO_FLAG_EXT_USED;
+	}
 
 	if (ops->remove)
 		ops->remove(ops, wdata);
@@ -749,7 +762,6 @@ static void wiimote_ext_unload(struct wiimote_data *wdata)
 
 static void wiimote_mp_load(struct wiimote_data *wdata)
 {
-	unsigned long flags;
 	const struct wiimod_ops *ops;
 	int ret;
 	__u8 mode = 2;
@@ -761,14 +773,12 @@ static void wiimote_mp_load(struct wiimote_data *wdata)
 			mode = 1;
 	}
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.mp = mode;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		wdata->state.mp = mode;
 }
 
 static void wiimote_mp_unload(struct wiimote_data *wdata)
 {
-	unsigned long flags;
 	const struct wiimod_ops *ops;
 
 	if (wdata->state.mp < 2)
@@ -776,10 +786,10 @@ static void wiimote_mp_unload(struct wiimote_data *wdata)
 
 	ops = &wiimod_mp;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.mp = 0;
-	wdata->state.flags &= ~WIIPROTO_FLAG_MP_USED;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock) {
+		wdata->state.mp = 0;
+		wdata->state.flags &= ~WIIPROTO_FLAG_MP_USED;
+	}
 
 	if (ops->remove)
 		ops->remove(ops, wdata);
@@ -846,11 +856,11 @@ static void wiimote_init_set_type(struct wiimote_data *wdata,
 
 done:
 	if (devtype == WIIMOTE_DEV_GENERIC)
-		hid_info(wdata->hdev, "cannot detect device; NAME: %s VID: %04x PID: %04x EXT: %04x\n",
-			name, vendor, product, exttype);
+		hid_info(wdata->hdev, "cannot detect device; NAME: %s VID: %04x PID: %04x EXT: %04x (%d)\n",
+			name, vendor, product, exttype, wdata->player_id);
 	else
-		hid_info(wdata->hdev, "detected device: %s\n",
-			 wiimote_devtype_names[devtype]);
+		hid_info(wdata->hdev, "detected device: %s (%d)\n",
+			 wiimote_devtype_names[devtype], wdata->player_id);
 
 	wiimote_modules_load(wdata, devtype);
 }
@@ -863,19 +873,19 @@ static void wiimote_init_detect(struct wiimote_data *wdata)
 
 	wiimote_cmd_acquire_noint(wdata);
 
-	spin_lock_irq(&wdata->state.lock);
-	wdata->state.devtype = WIIMOTE_DEV_UNKNOWN;
-	wiimote_cmd_set(wdata, WIIPROTO_REQ_SREQ, 0);
-	wiiproto_req_status(wdata);
-	spin_unlock_irq(&wdata->state.lock);
+	scoped_guard(spinlock_irq, &wdata->state.lock) {
+		wdata->state.devtype = WIIMOTE_DEV_UNKNOWN;
+		wiimote_cmd_set(wdata, WIIPROTO_REQ_SREQ, 0);
+		wiiproto_req_status(wdata);
+	}
+
 
 	ret = wiimote_cmd_wait_noint(wdata);
 	if (ret)
 		goto out_release;
 
-	spin_lock_irq(&wdata->state.lock);
-	ext = wdata->state.flags & WIIPROTO_FLAG_EXT_PLUGGED;
-	spin_unlock_irq(&wdata->state.lock);
+	scoped_guard(spinlock_irq, &wdata->state.lock)
+		ext = wdata->state.flags & WIIPROTO_FLAG_EXT_PLUGGED;
 
 	if (!ext)
 		goto out_release;
@@ -888,11 +898,11 @@ out_release:
 	wiimote_init_set_type(wdata, exttype);
 
 	/* schedule MP timer */
-	spin_lock_irq(&wdata->state.lock);
-	if (!(wdata->state.flags & WIIPROTO_FLAG_BUILTIN_MP) &&
-	    !(wdata->state.flags & WIIPROTO_FLAG_NO_MP))
-		mod_timer(&wdata->timer, jiffies + HZ * 4);
-	spin_unlock_irq(&wdata->state.lock);
+	scoped_guard(spinlock_irq, &wdata->state.lock) {
+		if (!(wdata->state.flags & WIIPROTO_FLAG_BUILTIN_MP) &&
+		!(wdata->state.flags & WIIPROTO_FLAG_NO_MP))
+			mod_timer(&wdata->timer, jiffies + HZ * 4);
+	}
 }
 
 /*
@@ -940,9 +950,8 @@ static bool wiimote_init_check(struct wiimote_data *wdata)
 	__u8 type, data[6];
 	bool ret, poll_mp;
 
-	spin_lock_irq(&wdata->state.lock);
-	flags = wdata->state.flags;
-	spin_unlock_irq(&wdata->state.lock);
+	scoped_guard(spinlock_irq, &wdata->state.lock)
+		flags = wdata->state.flags;
 
 	wiimote_cmd_acquire_noint(wdata);
 
@@ -958,11 +967,11 @@ static bool wiimote_init_check(struct wiimote_data *wdata)
 		type = wiimote_cmd_read_mp_mapped(wdata);
 		ret = type == WIIMOTE_MP_SINGLE;
 
-		spin_lock_irq(&wdata->state.lock);
-		ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
-		ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_MP_PLUGGED);
-		ret = ret && (wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
-		spin_unlock_irq(&wdata->state.lock);
+		scoped_guard(spinlock_irq, &wdata->state.lock) {
+			ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
+			ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_MP_PLUGGED);
+			ret = ret && (wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
+		}
 
 		if (!ret)
 			hid_dbg(wdata->hdev, "state left: !EXT && MP\n");
@@ -983,10 +992,10 @@ static bool wiimote_init_check(struct wiimote_data *wdata)
 		type = wiimote_cmd_read_ext(wdata, data);
 		ret = type == wdata->state.exttype;
 
-		spin_lock_irq(&wdata->state.lock);
-		ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
-		ret = ret && (wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
-		spin_unlock_irq(&wdata->state.lock);
+		scoped_guard(spinlock_irq, &wdata->state.lock) {
+			ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
+			ret = ret && (wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
+		}
 
 		if (!ret)
 			hid_dbg(wdata->hdev, "state left: EXT && !MP\n");
@@ -1009,11 +1018,11 @@ static bool wiimote_init_check(struct wiimote_data *wdata)
 		type = wiimote_cmd_read_ext(wdata, data);
 		ret = type == wdata->state.exttype;
 
-		spin_lock_irq(&wdata->state.lock);
-		ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
-		ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
-		ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_EXT_PLUGGED);
-		spin_unlock_irq(&wdata->state.lock);
+		scoped_guard(spinlock_irq, &wdata->state.lock) {
+			ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
+			ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
+			ret = ret && !(wdata->state.flags & WIIPROTO_FLAG_EXT_PLUGGED);
+		}
 
 		if (!ret)
 			hid_dbg(wdata->hdev, "state left: !EXT && !MP\n");
@@ -1039,11 +1048,11 @@ static bool wiimote_init_check(struct wiimote_data *wdata)
 		ret = ret && type != WIIMOTE_MP_UNKNOWN;
 		ret = ret && type != WIIMOTE_MP_SINGLE;
 
-		spin_lock_irq(&wdata->state.lock);
-		ret = ret && (wdata->state.flags & WIIPROTO_FLAG_EXT_PLUGGED);
-		ret = ret && (wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
-		ret = ret && (wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
-		spin_unlock_irq(&wdata->state.lock);
+		scoped_guard(spinlock_irq, &wdata->state.lock) {
+			ret = ret && (wdata->state.flags & WIIPROTO_FLAG_EXT_PLUGGED);
+			ret = ret && (wdata->state.flags & WIIPROTO_FLAG_EXT_ACTIVE);
+			ret = ret && (wdata->state.flags & WIIPROTO_FLAG_MP_ACTIVE);
+		}
 
 		if (!ret)
 			hid_dbg(wdata->hdev, "state left: EXT && MP\n");
@@ -1075,6 +1084,9 @@ static const char *wiimote_exttype_names[WIIMOTE_EXT_NUM] = {
 	[WIIMOTE_EXT_CLASSIC_CONTROLLER] = "Nintendo Wii Classic Controller",
 	[WIIMOTE_EXT_BALANCE_BOARD] = "Nintendo Wii Balance Board",
 	[WIIMOTE_EXT_PRO_CONTROLLER] = "Nintendo Wii U Pro Controller",
+	[WIIMOTE_EXT_DRUMS] = "Nintendo Wii Drums",
+	[WIIMOTE_EXT_GUITAR] = "Nintendo Wii Guitar",
+	[WIIMOTE_EXT_TURNTABLE] = "Nintendo Wii Turntable"
 };
 
 /*
@@ -1095,16 +1107,14 @@ static void wiimote_init_hotplug(struct wiimote_data *wdata)
 
 	wiimote_cmd_acquire_noint(wdata);
 
-	spin_lock_irq(&wdata->state.lock);
+	scoped_guard(spinlock_irq, &wdata->state.lock) {
+		/* get state snapshot that we will then work on */
+		flags = wdata->state.flags;
 
-	/* get state snapshot that we will then work on */
-	flags = wdata->state.flags;
-
-	/* disable event forwarding temporarily */
-	wdata->state.flags &= ~WIIPROTO_FLAG_EXT_ACTIVE;
-	wdata->state.flags &= ~WIIPROTO_FLAG_MP_ACTIVE;
-
-	spin_unlock_irq(&wdata->state.lock);
+		/* disable event forwarding temporarily */
+		wdata->state.flags &= ~WIIPROTO_FLAG_EXT_ACTIVE;
+		wdata->state.flags &= ~WIIPROTO_FLAG_MP_ACTIVE;
+	}
 
 	/* init extension and MP (deactivates current extension or MP) */
 	wiimote_cmd_init_ext(wdata);
@@ -1127,9 +1137,8 @@ static void wiimote_init_hotplug(struct wiimote_data *wdata)
 			hid_info(wdata->hdev, "cannot detect extension; %6phC\n",
 				 extdata);
 		} else if (exttype == WIIMOTE_EXT_NONE) {
-			spin_lock_irq(&wdata->state.lock);
-			wdata->state.exttype = WIIMOTE_EXT_NONE;
-			spin_unlock_irq(&wdata->state.lock);
+			scoped_guard(spinlock_irq, &wdata->state.lock)
+				wdata->state.exttype = WIIMOTE_EXT_NONE;
 		} else {
 			hid_info(wdata->hdev, "detected extension: %s\n",
 				 wiimote_exttype_names[exttype]);
@@ -1159,7 +1168,7 @@ static void wiimote_init_hotplug(struct wiimote_data *wdata)
 		wiimote_cmd_release(wdata);
 
 		/* delete MP hotplug timer */
-		del_timer_sync(&wdata->timer);
+		timer_delete_sync(&wdata->timer);
 	} else {
 		/* reschedule MP hotplug timer */
 		if (!(flags & WIIPROTO_FLAG_BUILTIN_MP) &&
@@ -1167,27 +1176,25 @@ static void wiimote_init_hotplug(struct wiimote_data *wdata)
 			mod_timer(&wdata->timer, jiffies + HZ * 4);
 	}
 
-	spin_lock_irq(&wdata->state.lock);
-
-	/* enable data forwarding again and set expected hotplug state */
-	if (mp) {
-		wdata->state.flags |= WIIPROTO_FLAG_MP_ACTIVE;
-		if (wdata->state.exttype == WIIMOTE_EXT_NONE) {
-			wdata->state.flags &= ~WIIPROTO_FLAG_EXT_PLUGGED;
-			wdata->state.flags &= ~WIIPROTO_FLAG_MP_PLUGGED;
-		} else {
-			wdata->state.flags &= ~WIIPROTO_FLAG_EXT_PLUGGED;
-			wdata->state.flags |= WIIPROTO_FLAG_MP_PLUGGED;
+	scoped_guard(spinlock_irq, &wdata->state.lock) {
+		/* enable data forwarding again and set expected hotplug state */
+		if (mp) {
+			wdata->state.flags |= WIIPROTO_FLAG_MP_ACTIVE;
+			if (wdata->state.exttype == WIIMOTE_EXT_NONE) {
+				wdata->state.flags &= ~WIIPROTO_FLAG_EXT_PLUGGED;
+				wdata->state.flags &= ~WIIPROTO_FLAG_MP_PLUGGED;
+			} else {
+				wdata->state.flags &= ~WIIPROTO_FLAG_EXT_PLUGGED;
+				wdata->state.flags |= WIIPROTO_FLAG_MP_PLUGGED;
+				wdata->state.flags |= WIIPROTO_FLAG_EXT_ACTIVE;
+			}
+		} else if (wdata->state.exttype != WIIMOTE_EXT_NONE) {
 			wdata->state.flags |= WIIPROTO_FLAG_EXT_ACTIVE;
 		}
-	} else if (wdata->state.exttype != WIIMOTE_EXT_NONE) {
-		wdata->state.flags |= WIIPROTO_FLAG_EXT_ACTIVE;
+
+		/* request status report for hotplug state updates */
+		wiiproto_req_status(wdata);
 	}
-
-	/* request status report for hotplug state updates */
-	wiiproto_req_status(wdata);
-
-	spin_unlock_irq(&wdata->state.lock);
 
 	hid_dbg(wdata->hdev, "detected extensions: MP: %d EXT: %d\n",
 		wdata->state.mp, wdata->state.exttype);
@@ -1219,16 +1226,13 @@ void __wiimote_schedule(struct wiimote_data *wdata)
 
 static void wiimote_schedule(struct wiimote_data *wdata)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	__wiimote_schedule(wdata);
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		__wiimote_schedule(wdata);
 }
 
 static void wiimote_init_timeout(struct timer_list *t)
 {
-	struct wiimote_data *wdata = from_timer(wdata, t, timer);
+	struct wiimote_data *wdata = timer_container_of(wdata, t, timer);
 
 	wiimote_schedule(wdata);
 }
@@ -1475,7 +1479,7 @@ static void handler_return(struct wiimote_data *wdata, const __u8 *payload)
 		wdata->state.cmd_err = err;
 		wiimote_cmd_complete(wdata);
 	} else if (err) {
-		hid_warn(wdata->hdev, "Remote error %hhu on req %hhu\n", err,
+		hid_warn(wdata->hdev, "Remote error %u on req %u\n", err,
 									cmd);
 	}
 }
@@ -1579,7 +1583,7 @@ struct wiiproto_handler {
 	void (*func)(struct wiimote_data *wdata, const __u8 *payload);
 };
 
-static struct wiiproto_handler handlers[] = {
+static const struct wiiproto_handler handlers[] = {
 	{ .id = WIIPROTO_REQ_STATUS, .size = 6, .func = handler_status },
 	{ .id = WIIPROTO_REQ_STATUS, .size = 2, .func = handler_status_K },
 	{ .id = WIIPROTO_REQ_DATA, .size = 21, .func = handler_data },
@@ -1611,19 +1615,17 @@ static int wiimote_hid_event(struct hid_device *hdev, struct hid_report *report,
 							u8 *raw_data, int size)
 {
 	struct wiimote_data *wdata = hid_get_drvdata(hdev);
-	struct wiiproto_handler *h;
+	const struct wiiproto_handler *h;
 	int i;
-	unsigned long flags;
 
 	if (size < 1)
 		return -EINVAL;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-
 	for (i = 0; handlers[i].id; ++i) {
 		h = &handlers[i];
 		if (h->id == raw_data[0] && h->size < size) {
-			h->func(wdata, &raw_data[1]);
+			scoped_guard(spinlock_irqsave, &wdata->state.lock)
+				h->func(wdata, &raw_data[1]);
 			break;
 		}
 	}
@@ -1631,8 +1633,6 @@ static int wiimote_hid_event(struct hid_device *hdev, struct hid_report *report,
 	if (!handlers[i].id)
 		hid_warn(hdev, "Unhandled report %hhu size %d\n", raw_data[0],
 									size);
-
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
 
 	return 0;
 }
@@ -1643,11 +1643,9 @@ static ssize_t wiimote_ext_show(struct device *dev,
 {
 	struct wiimote_data *wdata = dev_to_wii(dev);
 	__u8 type;
-	unsigned long flags;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	type = wdata->state.exttype;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		type = wdata->state.exttype;
 
 	switch (type) {
 	case WIIMOTE_EXT_NONE:
@@ -1660,8 +1658,13 @@ static ssize_t wiimote_ext_show(struct device *dev,
 		return sprintf(buf, "balanceboard\n");
 	case WIIMOTE_EXT_PRO_CONTROLLER:
 		return sprintf(buf, "procontroller\n");
+	case WIIMOTE_EXT_DRUMS:
+		return sprintf(buf, "drums\n");
+	case WIIMOTE_EXT_GUITAR:
+		return sprintf(buf, "guitar\n");
+	case WIIMOTE_EXT_TURNTABLE:
+		return sprintf(buf, "turntable\n");
 	case WIIMOTE_EXT_UNKNOWN:
-		/* fallthrough */
 	default:
 		return sprintf(buf, "unknown\n");
 	}
@@ -1691,11 +1694,9 @@ static ssize_t wiimote_dev_show(struct device *dev,
 {
 	struct wiimote_data *wdata = dev_to_wii(dev);
 	__u8 type;
-	unsigned long flags;
 
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	type = wdata->state.devtype;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		type = wdata->state.devtype;
 
 	switch (type) {
 	case WIIMOTE_DEV_GENERIC:
@@ -1711,7 +1712,6 @@ static ssize_t wiimote_dev_show(struct device *dev,
 	case WIIMOTE_DEV_PENDING:
 		return sprintf(buf, "pending\n");
 	case WIIMOTE_DEV_UNKNOWN:
-		/* fallthrough */
 	default:
 		return sprintf(buf, "unknown\n");
 	}
@@ -1723,7 +1723,7 @@ static struct wiimote_data *wiimote_create(struct hid_device *hdev)
 {
 	struct wiimote_data *wdata;
 
-	wdata = kzalloc(sizeof(*wdata), GFP_KERNEL);
+	wdata = kzalloc_obj(*wdata);
 	if (!wdata)
 		return NULL;
 
@@ -1738,6 +1738,7 @@ static struct wiimote_data *wiimote_create(struct hid_device *hdev)
 	mutex_init(&wdata->state.sync);
 	wdata->state.drm = WIIPROTO_REQ_DRM_K;
 	wdata->state.cmd_battery = 0xff;
+	wdata->player_id = 0; // min 1, u8 0 is unassigned id
 
 	INIT_WORK(&wdata->init_worker, wiimote_init_worker);
 	timer_setup(&wdata->timer, wiimote_init_timeout, 0);
@@ -1745,19 +1746,22 @@ static struct wiimote_data *wiimote_create(struct hid_device *hdev)
 	return wdata;
 }
 
+/* Global id allocator for wii remotes */
+static DEFINE_IDA(wiimote_ida);
+
 static void wiimote_destroy(struct wiimote_data *wdata)
 {
-	unsigned long flags;
-
 	wiidebug_deinit(wdata);
 
+	if (wdata->player_id > 0)
+		ida_free(&wiimote_ida, wdata->player_id);
+
 	/* prevent init_worker from being scheduled again */
-	spin_lock_irqsave(&wdata->state.lock, flags);
-	wdata->state.flags |= WIIPROTO_FLAG_EXITING;
-	spin_unlock_irqrestore(&wdata->state.lock, flags);
+	scoped_guard(spinlock_irqsave, &wdata->state.lock)
+		wdata->state.flags |= WIIPROTO_FLAG_EXITING;
 
 	cancel_work_sync(&wdata->init_worker);
-	del_timer_sync(&wdata->timer);
+	timer_shutdown_sync(&wdata->timer);
 
 	device_remove_file(&wdata->hdev->dev, &dev_attr_devtype);
 	device_remove_file(&wdata->hdev->dev, &dev_attr_extension);
@@ -1820,7 +1824,14 @@ static int wiimote_hid_probe(struct hid_device *hdev,
 	if (ret)
 		goto err_free;
 
-	hid_info(hdev, "New device registered\n");
+	ret = ida_alloc_range(&wiimote_ida, 1, 255, GFP_KERNEL);
+	if (ret < 1) {
+		hid_err(hdev, "cannot allocate controller id\n");
+		goto err_free;
+	}
+
+	wdata->player_id = ret;
+	hid_info(hdev, "New device registered (Wiimote %d)\n", wdata->player_id);
 
 	/* schedule device detection */
 	wiimote_schedule(wdata);
@@ -1859,6 +1870,11 @@ static const struct hid_device_id wiimote_hid_devices[] = {
 				USB_DEVICE_ID_NINTENDO_WIIMOTE2) },
 	{ }
 };
+
+bool wiimote_dpad_as_analog = false;
+module_param_named(dpad_as_analog, wiimote_dpad_as_analog, bool, 0644);
+MODULE_PARM_DESC(dpad_as_analog, "Use D-Pad as main analog input");
+
 MODULE_DEVICE_TABLE(hid, wiimote_hid_devices);
 
 static struct hid_driver wiimote_hid_driver = {
@@ -1868,7 +1884,21 @@ static struct hid_driver wiimote_hid_driver = {
 	.remove = wiimote_hid_remove,
 	.raw_event = wiimote_hid_event,
 };
-module_hid_driver(wiimote_hid_driver);
+
+
+static int __init wiimote_init(void)
+{
+	return hid_register_driver(&wiimote_hid_driver);
+}
+
+static void __exit wiimote_exit(void)
+{
+	hid_unregister_driver(&wiimote_hid_driver);
+	ida_destroy(&wiimote_ida);
+}
+
+module_init(wiimote_init);
+module_exit(wiimote_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Herrmann <dh.herrmann@gmail.com>");

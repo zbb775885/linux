@@ -2,17 +2,21 @@
 // Copyright (C) 2017 Arm Ltd.
 #define pr_fmt(fmt) "sdei: " fmt
 
+#include <linux/arm-smccc.h>
 #include <linux/arm_sdei.h>
 #include <linux/hardirq.h>
 #include <linux/irqflags.h>
 #include <linux/sched/task_stack.h>
+#include <linux/scs.h>
 #include <linux/uaccess.h>
 
 #include <asm/alternative.h>
+#include <asm/exception.h>
 #include <asm/kprobes.h>
 #include <asm/mmu.h>
 #include <asm/ptrace.h>
 #include <asm/sections.h>
+#include <asm/stacktrace.h>
 #include <asm/sysreg.h>
 #include <asm/vmap_stack.h>
 
@@ -30,10 +34,19 @@ unsigned long sdei_exit_mode;
 DECLARE_PER_CPU(unsigned long *, sdei_stack_normal_ptr);
 DECLARE_PER_CPU(unsigned long *, sdei_stack_critical_ptr);
 
-#ifdef CONFIG_VMAP_STACK
 DEFINE_PER_CPU(unsigned long *, sdei_stack_normal_ptr);
 DEFINE_PER_CPU(unsigned long *, sdei_stack_critical_ptr);
+
+DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_normal_ptr);
+DECLARE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
+
+#ifdef CONFIG_SHADOW_CALL_STACK
+DEFINE_PER_CPU(unsigned long *, sdei_shadow_call_stack_normal_ptr);
+DEFINE_PER_CPU(unsigned long *, sdei_shadow_call_stack_critical_ptr);
 #endif
+
+DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_normal_event);
+DEFINE_PER_CPU(struct sdei_registered_event *, sdei_active_critical_event);
 
 static void _free_sdei_stack(unsigned long * __percpu *ptr, int cpu)
 {
@@ -88,23 +101,60 @@ static int init_sdei_stacks(void)
 	return err;
 }
 
-bool _on_sdei_stack(unsigned long sp)
+static void _free_sdei_scs(unsigned long * __percpu *ptr, int cpu)
 {
-	unsigned long low, high;
+	void *s;
 
-	if (!IS_ENABLED(CONFIG_VMAP_STACK))
-		return false;
+	s = per_cpu(*ptr, cpu);
+	if (s) {
+		per_cpu(*ptr, cpu) = NULL;
+		scs_free(s);
+	}
+}
 
-	low = (unsigned long)raw_cpu_read(sdei_stack_critical_ptr);
-	high = low + SDEI_STACK_SIZE;
+static void free_sdei_scs(void)
+{
+	int cpu;
 
-	if (low <= sp && sp < high)
-		return true;
+	for_each_possible_cpu(cpu) {
+		_free_sdei_scs(&sdei_shadow_call_stack_normal_ptr, cpu);
+		_free_sdei_scs(&sdei_shadow_call_stack_critical_ptr, cpu);
+	}
+}
 
-	low = (unsigned long)raw_cpu_read(sdei_stack_normal_ptr);
-	high = low + SDEI_STACK_SIZE;
+static int _init_sdei_scs(unsigned long * __percpu *ptr, int cpu)
+{
+	void *s;
 
-	return (low <= sp && sp < high);
+	s = scs_alloc(cpu_to_node(cpu));
+	if (!s)
+		return -ENOMEM;
+	per_cpu(*ptr, cpu) = s;
+
+	return 0;
+}
+
+static int init_sdei_scs(void)
+{
+	int cpu;
+	int err = 0;
+
+	if (!scs_is_enabled())
+		return 0;
+
+	for_each_possible_cpu(cpu) {
+		err = _init_sdei_scs(&sdei_shadow_call_stack_normal_ptr, cpu);
+		if (err)
+			break;
+		err = _init_sdei_scs(&sdei_shadow_call_stack_critical_ptr, cpu);
+		if (err)
+			break;
+	}
+
+	if (err)
+		free_sdei_scs();
+
+	return err;
 }
 
 unsigned long sdei_arch_get_entry_point(int conduit)
@@ -115,17 +165,18 @@ unsigned long sdei_arch_get_entry_point(int conduit)
 	 * dropped to EL1 because we don't support VHE, then we can't support
 	 * SDEI.
 	 */
-	if (is_hyp_mode_available() && !is_kernel_in_hyp_mode()) {
+	if (is_hyp_nvhe()) {
 		pr_err("Not supported on this hardware/boot configuration\n");
-		return 0;
+		goto out_err;
 	}
 
-	if (IS_ENABLED(CONFIG_VMAP_STACK)) {
-		if (init_sdei_stacks())
-			return 0;
-	}
+	if (init_sdei_stacks())
+		goto out_err;
 
-	sdei_exit_mode = (conduit == CONDUIT_HVC) ? SDEI_EXIT_HVC : SDEI_EXIT_SMC;
+	if (init_sdei_scs())
+		goto out_err_free_stacks;
+
+	sdei_exit_mode = (conduit == SMCCC_CONDUIT_HVC) ? SDEI_EXIT_HVC : SDEI_EXIT_SMC;
 
 #ifdef CONFIG_UNMAP_KERNEL_AT_EL0
 	if (arm64_kernel_unmapped_at_el0()) {
@@ -138,23 +189,55 @@ unsigned long sdei_arch_get_entry_point(int conduit)
 #endif /* CONFIG_UNMAP_KERNEL_AT_EL0 */
 		return (unsigned long)__sdei_asm_handler;
 
+out_err_free_stacks:
+	free_sdei_stacks();
+out_err:
+	return 0;
 }
 
 /*
- * __sdei_handler() returns one of:
- *  SDEI_EV_HANDLED -  success, return to the interrupted context.
- *  SDEI_EV_FAILED  -  failure, return this error code to firmare.
- *  virtual-address -  success, return to this address.
+ * Exceptions an SDEI handler may take without harm once __sdei_handler() has
+ * restored the interrupted context's exception registers. Their handlers are
+ * safe in NMI context:
+ *  - EL1 data aborts on translation, permission and access-flag faults:
+ *    faulthandler_disabled() is true in NMI context, so do_page_fault() never
+ *    takes the mmap lock. This covers the _nofault() accessors used by the
+ *    generic dump_stack()/show_regs() code (e.g. print_worker_info()).
+ *  - BRK: kprobes, WARN/BUG, kCFI and UBSAN traps, all NMI-capable.
+ * Anything else taken at EL1 is fatal on its own, or unexpected here.
  */
-static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
-					     struct sdei_registered_event *arg)
+static bool sdei_nested_exception_ok(unsigned long esr)
+{
+	switch (ESR_ELx_EC(esr)) {
+	case ESR_ELx_EC_DABT_CUR:
+		return esr_fsc_is_translation_fault(esr) ||
+		       esr_fsc_is_permission_fault(esr) ||
+		       esr_fsc_is_access_flag_fault(esr);
+	case ESR_ELx_EC_BRK64:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * do_sdei_event() returns one of:
+ *  SDEI_EV_HANDLED -  success, return to the interrupted context.
+ *  SDEI_EV_FAILED  -  failure, return this error code to firmware.
+ *  virtual-address -  success, return to this address.
+ *
+ * vbar is the interrupted context's VBAR_EL1, for the IRQ-like resume.
+ */
+unsigned long __kprobes do_sdei_event(struct pt_regs *regs,
+				      struct sdei_registered_event *arg,
+				      unsigned long vbar)
 {
 	u32 mode;
 	int i, err = 0;
 	int clobbered_registers = 4;
 	u64 elr = read_sysreg(elr_el1);
+	u64 nested_elr, nested_esr, nested_far;
 	u32 kernel_mode = read_sysreg(CurrentEL) | 1;	/* +SPSel */
-	unsigned long vbar = read_sysreg(vbar_el1);
 
 	if (arm64_kernel_unmapped_at_el0())
 		clobbered_registers++;
@@ -165,24 +248,27 @@ static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
 		sdei_api_event_context(i, &regs->regs[i]);
 	}
 
-	/*
-	 * We didn't take an exception to get here, set PAN. UAO will be cleared
-	 * by sdei_event_handler()s set_fs(USER_DS) call.
-	 */
-	__uaccess_enable_hw_pan();
-
 	err = sdei_event_handler(regs, arg);
+
+	/*
+	 * A synchronous exception taken by the handler has overwritten the
+	 * exception registers; __sdei_handler() puts them back. Only the last
+	 * one's syndrome survives; report it if it is not one known to be
+	 * harmless.
+	 *
+	 * If the event interrupted a KVM world switch, VBAR points at the KVM
+	 * hyp vectors and any such exception is a hyp panic instead.
+	 */
+	nested_elr = read_sysreg(elr_el1);
+	nested_esr = read_sysreg(esr_el1);
+	nested_far = read_sysreg(far_el1);
+	if (nested_elr != elr && !sdei_nested_exception_ok(nested_esr)) {
+		pr_warn_once("unexpected exception during handler: ESR %#llx FAR %#llx near %pS\n",
+			     nested_esr, nested_far, (void *)nested_elr);
+	}
+
 	if (err)
 		return SDEI_EV_FAILED;
-
-	if (elr != read_sysreg(elr_el1)) {
-		/*
-		 * We took a synchronous exception from the SDEI handler.
-		 * This could deadlock, and if you interrupt KVM it will
-		 * hyp-panic instead.
-		 */
-		pr_warn("unsafe: exception during handler\n");
-	}
 
 	mode = regs->pstate & (PSR_MODE32_BIT | PSR_MODE_MASK);
 
@@ -190,7 +276,7 @@ static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
 	 * If we interrupted the kernel with interrupts masked, we always go
 	 * back to wherever we came from.
 	 */
-	if (mode == kernel_mode && !interrupts_enabled(regs))
+	if (mode == kernel_mode && regs_irqs_disabled(regs))
 		return SDEI_EV_HANDLED;
 
 	/*
@@ -207,29 +293,4 @@ static __kprobes unsigned long _sdei_handler(struct pt_regs *regs,
 		return vbar + 0x680;
 
 	return vbar + 0x480;
-}
-
-
-asmlinkage __kprobes notrace unsigned long
-__sdei_handler(struct pt_regs *regs, struct sdei_registered_event *arg)
-{
-	unsigned long ret;
-	bool do_nmi_exit = false;
-
-	/*
-	 * nmi_enter() deals with printk() re-entrance and use of RCU when
-	 * RCU believed this CPU was idle. Because critical events can
-	 * interrupt normal events, we may already be in_nmi().
-	 */
-	if (!in_nmi()) {
-		nmi_enter();
-		do_nmi_exit = true;
-	}
-
-	ret = _sdei_handler(regs, arg);
-
-	if (do_nmi_exit)
-		nmi_exit();
-
-	return ret;
 }

@@ -199,7 +199,8 @@ static void ehci_handle_controller_death(struct ehci_hcd *ehci)
 
 	/* Clean up the mess */
 	ehci->rh_state = EHCI_RH_HALTED;
-	ehci_writel(ehci, 0, &ehci->regs->configured_flag);
+	if (!ehci->no_configured_flag)
+		ehci_writel(ehci, 0, &ehci->regs->configured_flag);
 	ehci_writel(ehci, 0, &ehci->regs->intr_enable);
 	ehci_work(ehci);
 	end_unlink_async(ehci);
@@ -347,7 +348,7 @@ static void ehci_iaa_watchdog(struct ehci_hcd *ehci)
 	 */
 	status = ehci_readl(ehci, &ehci->regs->status);
 	if ((status & STS_IAA) || !(cmd & CMD_IAAD)) {
-		COUNT(ehci->stats.lost_iaa);
+		INCR(ehci->stats.lost_iaa);
 		ehci_writel(ehci, STS_IAA, &ehci->regs->status);
 	}
 

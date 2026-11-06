@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /// Find uses of standard freeing functons on values allocated using devm_
 /// functions.  Values allocated using the devm_functions are freed when
 /// the device is detached, and thus the use of the standard freeing
 /// function would cause a double free.
-/// See Documentation/driver-model/devres.txt for more information.
+/// See Documentation/driver-api/driver-model/devres.rst for more information.
 ///
 /// A difficulty of detecting this problem is that the standard freeing
 /// function might be called from a different function than the one
@@ -14,9 +15,9 @@
 /// less reliable in these cases.
 ///
 // Confidence: Moderate
-// Copyright: (C) 2011 Julia Lawall, INRIA/LIP6.  GPLv2.
-// Copyright: (C) 2011 Gilles Muller, INRIA/LiP6.  GPLv2.
-// URL: http://coccinelle.lip6.fr/
+// Copyright: (C) 2011 Julia Lawall, INRIA/LIP6.
+// Copyright: (C) 2011 Gilles Muller, INRIA/LiP6.
+// URL: https://coccinelle.gitlabpages.inria.fr/website
 // Comments:
 // Options: --no-includes --include-headers
 
@@ -25,7 +26,8 @@ virtual report
 virtual context
 
 @r depends on context || org || report@
-expression x;
+type T;
+T x;
 @@
 
 (
@@ -51,24 +53,30 @@ expression x;
 |
  x = devm_ioremap(...)
 |
- x = devm_ioremap_nocache(...)
-|
  x = devm_ioport_map(...)
 )
 
 @safe depends on context || org || report exists@
-expression x;
+r.T x;
 position p;
 @@
 
 (
  x = kmalloc(...)
 |
+ x = kmalloc_obj(...)
+|
+ x = kmalloc_objs(...)
+|
  x = kvasprintf(...)
 |
  x = kasprintf(...)
 |
  x = kzalloc(...)
+|
+ x = kzalloc_obj(...)
+|
+ x = kzalloc_objs(...)
 |
  x = kmalloc_array(...)
 |
@@ -84,17 +92,13 @@ position p;
 |
  x = ioremap(...)
 |
- x = ioremap_nocache(...)
-|
  x = ioport_map(...)
 )
 ...
 (
  kfree@p(x)
 |
- kzfree@p(x)
-|
- __krealloc@p(x, ...)
+ kfree_sensitive@p(x)
 |
  krealloc@p(x, ...)
 |
@@ -110,16 +114,14 @@ position p;
 )
 
 @pb@
-expression r.x;
+r.T r.x;
 position p != safe.p;
 @@
 
 (
 * kfree@p(x)
 |
-* kzfree@p(x)
-|
-* __krealloc@p(x, ...)
+* kfree_sensitive@p(x)
 |
 * krealloc@p(x, ...)
 |

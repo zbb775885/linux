@@ -9,7 +9,7 @@
  */
 
 #include <linux/atomic.h>
-#include <linux/crc-ccitt.h>
+#include <linux/crc-itu-t.h>
 #include <linux/delay.h>
 #include <linux/export.h>
 #include <linux/init.h>
@@ -18,10 +18,10 @@
 #include <linux/mfd/rave-sp.h>
 #include <linux/module.h>
 #include <linux/of.h>
-#include <linux/of_device.h>
+#include <linux/of_platform.h>
 #include <linux/sched.h>
 #include <linux/serdev.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /*
  * UART protocol using following entities:
@@ -45,7 +45,9 @@
 #define RAVE_SP_DLE			0x10
 
 #define RAVE_SP_MAX_DATA_SIZE		64
-#define RAVE_SP_CHECKSUM_SIZE		2  /* Worst case scenario on RDU2 */
+#define RAVE_SP_CHECKSUM_8B2C		1
+#define RAVE_SP_CHECKSUM_CCITT		2
+#define RAVE_SP_CHECKSUM_SIZE		RAVE_SP_CHECKSUM_CCITT
 /*
  * We don't store STX, ETX and unescaped bytes, so Rx is only
  * DATA + CSUM
@@ -61,15 +63,11 @@
 #define RAVE_SP_TX_BUFFER_SIZE				\
 	(RAVE_SP_STX_ETX_SIZE + 2 * RAVE_SP_RX_BUFFER_SIZE)
 
-#define RAVE_SP_BOOT_SOURCE_GET		0
-#define RAVE_SP_BOOT_SOURCE_SET		1
-
-#define RAVE_SP_RDU2_BOARD_TYPE_RMB	0
-#define RAVE_SP_RDU2_BOARD_TYPE_DEB	1
-
-#define RAVE_SP_BOOT_SOURCE_SD		0
-#define RAVE_SP_BOOT_SOURCE_EMMC	1
-#define RAVE_SP_BOOT_SOURCE_NOR		2
+enum rave_sp_frame_offset {
+	RAVE_SP_FRAME_CODE_OFFSET,
+	RAVE_SP_FRAME_ACK_ID_OFFSET,
+	RAVE_SP_FRAME_DATA_OFFSET,
+};
 
 /**
  * enum rave_sp_deframer_state - Possible state for de-framer
@@ -104,7 +102,7 @@ struct rave_sp_deframer {
  * @data:	Buffer to store reply payload in
  * @code:	Expected reply code
  * @ackid:	Expected reply ACK ID
- * @completion: Successful reply reception completion
+ * @received:   Successful reply reception completion
  */
 struct rave_sp_reply {
 	size_t length;
@@ -117,7 +115,7 @@ struct rave_sp_reply {
 /**
  * struct rave_sp_checksum - Variant specific checksum implementation details
  *
- * @length:	Caculated checksum length
+ * @length:	Calculated checksum length
  * @subroutine:	Utilized checksum algorithm implementation
  */
 struct rave_sp_checksum {
@@ -125,14 +123,44 @@ struct rave_sp_checksum {
 	void (*subroutine)(const u8 *, size_t, u8 *);
 };
 
+struct rave_sp_version {
+	u8     hardware;
+	__le16 major;
+	u8     minor;
+	u8     letter[2];
+} __packed;
+
+struct rave_sp_status {
+	struct rave_sp_version bootloader_version;
+	struct rave_sp_version firmware_version;
+	u16 rdu_eeprom_flag;
+	u16 dds_eeprom_flag;
+	u8  pic_flag;
+	u8  orientation;
+	u32 etc;
+	s16 temp[2];
+	u8  backlight_current[3];
+	u8  dip_switch;
+	u8  host_interrupt;
+	u16 voltage_28;
+	u8  i2c_device_status;
+	u8  power_status;
+	u8  general_status;
+	u8  deprecated1;
+	u8  power_led_status;
+	u8  deprecated2;
+	u8  periph_power_shutoff;
+} __packed;
+
 /**
  * struct rave_sp_variant_cmds - Variant specific command routines
  *
  * @translate:	Generic to variant specific command mapping routine
- *
+ * @get_status: Variant specific implementation of CMD_GET_STATUS
  */
 struct rave_sp_variant_cmds {
 	int (*translate)(enum rave_sp_command);
+	int (*get_status)(struct rave_sp *sp, struct rave_sp_status *);
 };
 
 /**
@@ -160,6 +188,8 @@ struct rave_sp_variant {
  * @variant:			Device variant specific information
  * @event_notifier_list:	Input event notification chain
  *
+ * @part_number_firmware:	Firmware version
+ * @part_number_bootloader:	Bootloader version
  */
 struct rave_sp {
 	struct serdev_device *serdev;
@@ -171,6 +201,9 @@ struct rave_sp {
 
 	const struct rave_sp_variant *variant;
 	struct blocking_notifier_head event_notifier_list;
+
+	const char *part_number_firmware;
+	const char *part_number_bootloader;
 };
 
 static bool rave_sp_id_is_event(u8 code)
@@ -224,7 +257,7 @@ static void csum_8b2c(const u8 *buf, size_t size, u8 *crc)
 
 static void csum_ccitt(const u8 *buf, size_t size, u8 *crc)
 {
-	const u16 calculated = crc_ccitt_false(0xffff, buf, size);
+	const u16 calculated = crc_itu_t(0xffff, buf, size);
 
 	/*
 	 * While the rest of the wire protocol is little-endian,
@@ -243,7 +276,7 @@ static void *stuff(unsigned char *dest, const unsigned char *src, size_t n)
 		case RAVE_SP_ETX:
 		case RAVE_SP_DLE:
 			*dest++ = RAVE_SP_DLE;
-			/* FALLTHROUGH */
+			fallthrough;
 		default:
 			*dest++ = byte;
 		}
@@ -275,8 +308,8 @@ static int rave_sp_write(struct rave_sp *sp, const u8 *data, u8 data_size)
 
 	length = dest - frame;
 
-	print_hex_dump(KERN_DEBUG, "rave-sp tx: ", DUMP_PREFIX_NONE,
-		       16, 1, frame, length, false);
+	print_hex_dump_debug("rave-sp tx: ", DUMP_PREFIX_NONE,
+			     16, 1, frame, length, false);
 
 	return serdev_device_write(sp->serdev, frame, length, HZ);
 }
@@ -298,7 +331,7 @@ static u8 rave_sp_reply_code(u8 command)
 		return command + 0x20;
 	case 0xE0 ... 0xEF:
 		/*
-		 * Events emitted by all versions of the firmare use
+		 * Events emitted by all versions of the firmware use
 		 * least significant bit to get an ACK code
 		 */
 		return command | 0x01;
@@ -325,13 +358,13 @@ int rave_sp_exec(struct rave_sp *sp,
 	int command, ret = 0;
 	u8 ackid;
 
-	command = sp->variant->cmd.translate(data[0]);
+	command = sp->variant->cmd.translate(data[RAVE_SP_FRAME_CODE_OFFSET]);
 	if (command < 0)
 		return command;
 
 	ackid       = atomic_inc_return(&sp->ackid);
 	reply.ackid = ackid;
-	reply.code  = rave_sp_reply_code((u8)command),
+	reply.code  = rave_sp_reply_code((u8)command);
 
 	mutex_lock(&sp->bus_lock);
 
@@ -339,8 +372,8 @@ int rave_sp_exec(struct rave_sp *sp,
 	sp->reply = &reply;
 	mutex_unlock(&sp->reply_lock);
 
-	data[0] = command;
-	data[1] = ackid;
+	data[RAVE_SP_FRAME_CODE_OFFSET] = command;
+	data[RAVE_SP_FRAME_ACK_ID_OFFSET] = ackid;
 
 	rave_sp_write(sp, data, data_size);
 
@@ -361,16 +394,23 @@ EXPORT_SYMBOL_GPL(rave_sp_exec);
 static void rave_sp_receive_event(struct rave_sp *sp,
 				  const unsigned char *data, size_t length)
 {
-	u8 cmd[] = {
-		[0] = rave_sp_reply_code(data[0]),
-		[1] = data[1],
-	};
+	unsigned long action;
+	u8 cmd[RAVE_SP_FRAME_DATA_OFFSET];
+
+	if (length < RAVE_SP_FRAME_DATA_OFFSET + 1) {
+		dev_warn(&sp->serdev->dev, "Dropping short event frame\n");
+		return;
+	}
+
+	cmd[RAVE_SP_FRAME_CODE_OFFSET] =
+		rave_sp_reply_code(data[RAVE_SP_FRAME_CODE_OFFSET]);
+	cmd[RAVE_SP_FRAME_ACK_ID_OFFSET] = data[RAVE_SP_FRAME_ACK_ID_OFFSET];
 
 	rave_sp_write(sp, cmd, sizeof(cmd));
 
-	blocking_notifier_call_chain(&sp->event_notifier_list,
-				     rave_sp_action_pack(data[0], data[2]),
-				     NULL);
+	action = rave_sp_action_pack(data[RAVE_SP_FRAME_CODE_OFFSET],
+				     data[RAVE_SP_FRAME_DATA_OFFSET]);
+	blocking_notifier_call_chain(&sp->event_notifier_list, action, NULL);
 }
 
 static void rave_sp_receive_reply(struct rave_sp *sp,
@@ -378,27 +418,35 @@ static void rave_sp_receive_reply(struct rave_sp *sp,
 {
 	struct device *dev = &sp->serdev->dev;
 	struct rave_sp_reply *reply;
-	const  size_t payload_length = length - 2;
+	size_t payload_length;
+
+	if (length < RAVE_SP_FRAME_DATA_OFFSET) {
+		dev_warn(dev, "Dropping short reply frame\n");
+		return;
+	}
+	payload_length = length - RAVE_SP_FRAME_DATA_OFFSET;
 
 	mutex_lock(&sp->reply_lock);
 	reply = sp->reply;
 
 	if (reply) {
-		if (reply->code == data[0] && reply->ackid == data[1] &&
+		if (reply->code == data[RAVE_SP_FRAME_CODE_OFFSET] &&
+		    reply->ackid == data[RAVE_SP_FRAME_ACK_ID_OFFSET] &&
 		    payload_length >= reply->length) {
 			/*
 			 * We are relying on memcpy(dst, src, 0) to be a no-op
 			 * when handling commands that have a no-payload reply
 			 */
-			memcpy(reply->data, &data[2], reply->length);
+			memcpy(reply->data, &data[RAVE_SP_FRAME_DATA_OFFSET],
+			       reply->length);
 			complete(&reply->received);
 			sp->reply = NULL;
 		} else {
 			dev_err(dev, "Ignoring incorrect reply\n");
 			dev_dbg(dev, "Code:   expected = 0x%08x received = 0x%08x\n",
-				reply->code, data[0]);
+				reply->code, data[RAVE_SP_FRAME_CODE_OFFSET]);
 			dev_dbg(dev, "ACK ID: expected = 0x%08x received = 0x%08x\n",
-				reply->ackid, data[1]);
+				reply->ackid, data[RAVE_SP_FRAME_ACK_ID_OFFSET]);
 			dev_dbg(dev, "Length: expected = %zu received = %zu\n",
 				reply->length, payload_length);
 		}
@@ -412,18 +460,26 @@ static void rave_sp_receive_frame(struct rave_sp *sp,
 				  size_t length)
 {
 	const size_t checksum_length = sp->variant->checksum->length;
-	const size_t payload_length  = length - checksum_length;
-	const u8 *crc_reported       = &data[payload_length];
 	struct device *dev           = &sp->serdev->dev;
-	u8 crc_calculated[checksum_length];
+	u8 crc_calculated[RAVE_SP_CHECKSUM_SIZE];
+	const u8 *crc_reported;
+	size_t payload_length;
 
-	print_hex_dump(KERN_DEBUG, "rave-sp rx: ", DUMP_PREFIX_NONE,
-		       16, 1, data, length, false);
+	if (unlikely(checksum_length > sizeof(crc_calculated))) {
+		dev_warn(dev, "Checksum too long, dropping\n");
+		return;
+	}
+
+	print_hex_dump_debug("rave-sp rx: ", DUMP_PREFIX_NONE,
+			     16, 1, data, length, false);
 
 	if (unlikely(length <= checksum_length)) {
 		dev_warn(dev, "Dropping short frame\n");
 		return;
 	}
+
+	payload_length = length - checksum_length;
+	crc_reported = &data[payload_length];
 
 	sp->variant->checksum->subroutine(data, payload_length,
 					  crc_calculated);
@@ -433,23 +489,23 @@ static void rave_sp_receive_frame(struct rave_sp *sp,
 		return;
 	}
 
-	if (rave_sp_id_is_event(data[0]))
-		rave_sp_receive_event(sp, data, length);
+	if (rave_sp_id_is_event(data[RAVE_SP_FRAME_CODE_OFFSET]))
+		rave_sp_receive_event(sp, data, payload_length);
 	else
-		rave_sp_receive_reply(sp, data, length);
+		rave_sp_receive_reply(sp, data, payload_length);
 }
 
-static int rave_sp_receive_buf(struct serdev_device *serdev,
-			       const unsigned char *buf, size_t size)
+static size_t rave_sp_receive_buf(struct serdev_device *serdev,
+				  const u8 *buf, size_t size)
 {
 	struct device *dev = &serdev->dev;
 	struct rave_sp *sp = dev_get_drvdata(dev);
 	struct rave_sp_deframer *deframer = &sp->deframer;
-	const unsigned char *src = buf;
-	const unsigned char *end = buf + size;
+	const u8 *src = buf;
+	const u8 *end = buf + size;
 
 	while (src < end) {
-		const unsigned char byte = *src++;
+		const u8 byte = *src++;
 
 		switch (deframer->state) {
 		case RAVE_SP_EXPECT_SOF:
@@ -488,7 +544,7 @@ static int rave_sp_receive_buf(struct serdev_device *serdev,
 				 * NOTE: The above means that only the
 				 * frame started by third SOF, sent
 				 * after this one will have a chance
-				 * to get throught.
+				 * to get through.
 				 */
 				goto reset_framer;
 			case RAVE_SP_DLE:
@@ -509,11 +565,9 @@ static int rave_sp_receive_buf(struct serdev_device *serdev,
 			 * deframer buffer
 			 */
 
-			/* FALLTHROUGH */
+			fallthrough;
 
 		case RAVE_SP_EXPECT_ESCAPED_DATA:
-			deframer->data[deframer->length++] = byte;
-
 			if (deframer->length == sizeof(deframer->data)) {
 				dev_warn(dev, "Bad frame: Too long\n");
 				/*
@@ -528,6 +582,8 @@ static int rave_sp_receive_buf(struct serdev_device *serdev,
 				goto reset_framer;
 			}
 
+			deframer->data[deframer->length++] = byte;
+
 			/*
 			 * We've extracted out special byte, now we
 			 * can go back to regular data collecting
@@ -539,7 +595,7 @@ static int rave_sp_receive_buf(struct serdev_device *serdev,
 
 	/*
 	 * The only way to get out of the above loop and end up here
-	 * is throught consuming all of the supplied data, so here we
+	 * is through consuming all of the supplied data, so here we
 	 * report that we processed it all.
 	 */
 	return size;
@@ -600,13 +656,89 @@ static int rave_sp_default_cmd_translate(enum rave_sp_command command)
 		return 0x14;
 	case RAVE_SP_CMD_SW_WDT:
 		return 0x1C;
+	case RAVE_SP_CMD_PET_WDT:
+		return 0x1D;
 	case RAVE_SP_CMD_RESET:
 		return 0x1E;
 	case RAVE_SP_CMD_RESET_REASON:
 		return 0x1F;
+	case RAVE_SP_CMD_RMB_EEPROM:
+		return 0x20;
 	default:
 		return -EINVAL;
 	}
+}
+
+static const char *devm_rave_sp_version(struct device *dev,
+					struct rave_sp_version *version)
+{
+	/*
+	 * NOTE: The format string below uses %02d to display u16
+	 * intentionally for the sake of backwards compatibility with
+	 * legacy software.
+	 */
+	return devm_kasprintf(dev, GFP_KERNEL, "%02d%02d%02d.%c%c\n",
+			      version->hardware,
+			      le16_to_cpu(version->major),
+			      version->minor,
+			      version->letter[0],
+			      version->letter[1]);
+}
+
+static int rave_sp_rdu1_get_status(struct rave_sp *sp,
+				   struct rave_sp_status *status)
+{
+	u8 cmd[] = {
+		[0] = RAVE_SP_CMD_STATUS,
+		[1] = 0
+	};
+
+	return rave_sp_exec(sp, cmd, sizeof(cmd), status, sizeof(*status));
+}
+
+static int rave_sp_emulated_get_status(struct rave_sp *sp,
+				       struct rave_sp_status *status)
+{
+	u8 cmd[] = {
+		[0] = RAVE_SP_CMD_GET_FIRMWARE_VERSION,
+		[1] = 0,
+	};
+	int ret;
+
+	ret = rave_sp_exec(sp, cmd, sizeof(cmd), &status->firmware_version,
+			   sizeof(status->firmware_version));
+	if (ret)
+		return ret;
+
+	cmd[0] = RAVE_SP_CMD_GET_BOOTLOADER_VERSION;
+	return rave_sp_exec(sp, cmd, sizeof(cmd), &status->bootloader_version,
+			    sizeof(status->bootloader_version));
+}
+
+static int rave_sp_get_status(struct rave_sp *sp)
+{
+	struct device *dev = &sp->serdev->dev;
+	struct rave_sp_status status;
+	const char *version;
+	int ret;
+
+	ret = sp->variant->cmd.get_status(sp, &status);
+	if (ret)
+		return ret;
+
+	version = devm_rave_sp_version(dev, &status.firmware_version);
+	if (!version)
+		return -ENOMEM;
+
+	sp->part_number_firmware = version;
+
+	version = devm_rave_sp_version(dev, &status.bootloader_version);
+	if (!version)
+		return -ENOMEM;
+
+	sp->part_number_bootloader = version;
+
+	return 0;
 }
 
 static const struct rave_sp_checksum rave_sp_checksum_8b2c = {
@@ -620,9 +752,10 @@ static const struct rave_sp_checksum rave_sp_checksum_ccitt = {
 };
 
 static const struct rave_sp_variant rave_sp_legacy = {
-	.checksum = &rave_sp_checksum_8b2c,
+	.checksum = &rave_sp_checksum_ccitt,
 	.cmd = {
 		.translate = rave_sp_default_cmd_translate,
+		.get_status = rave_sp_emulated_get_status,
 	},
 };
 
@@ -630,6 +763,7 @@ static const struct rave_sp_variant rave_sp_rdu1 = {
 	.checksum = &rave_sp_checksum_8b2c,
 	.cmd = {
 		.translate = rave_sp_rdu1_cmd_translate,
+		.get_status = rave_sp_rdu1_get_status,
 	},
 };
 
@@ -637,6 +771,7 @@ static const struct rave_sp_variant rave_sp_rdu2 = {
 	.checksum = &rave_sp_checksum_ccitt,
 	.cmd = {
 		.translate = rave_sp_rdu2_cmd_translate,
+		.get_status = rave_sp_emulated_get_status,
 	},
 };
 
@@ -657,6 +792,7 @@ static const struct serdev_device_ops rave_sp_serdev_device_ops = {
 static int rave_sp_probe(struct serdev_device *serdev)
 {
 	struct device *dev = &serdev->dev;
+	const char *unknown = "unknown\n";
 	struct rave_sp *sp;
 	u32 baud;
 	int ret;
@@ -688,6 +824,27 @@ static int rave_sp_probe(struct serdev_device *serdev)
 		return ret;
 
 	serdev_device_set_baudrate(serdev, baud);
+	serdev_device_set_flow_control(serdev, false);
+
+	ret = serdev_device_set_parity(serdev, SERDEV_PARITY_NONE);
+	if (ret) {
+		dev_err(dev, "Failed to set parity\n");
+		return ret;
+	}
+
+	ret = rave_sp_get_status(sp);
+	if (ret) {
+		dev_warn(dev, "Failed to get firmware status: %d\n", ret);
+		sp->part_number_firmware   = unknown;
+		sp->part_number_bootloader = unknown;
+	}
+
+	/*
+	 * Those strings already have a \n embedded, so there's no
+	 * need to have one in format string.
+	 */
+	dev_info(dev, "Firmware version: %s",   sp->part_number_firmware);
+	dev_info(dev, "Bootloader version: %s", sp->part_number_bootloader);
 
 	return devm_of_platform_populate(dev);
 }

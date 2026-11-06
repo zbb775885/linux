@@ -1,19 +1,14 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- *  linux/drivers/video/acornfb.h
- *
  *  Copyright (C) 1998,1999 Russell King
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  Frame buffer code for Acorn platforms
  */
-#if defined(HAS_VIDC20)
+
 #include <asm/hardware/iomd.h>
+
 #define VIDC_PALETTE_SIZE	256
 #define VIDC_NAME		"VIDC20"
-#endif
 
 #define EXTEND8(x) ((x)|(x)<<8)
 #define EXTEND4(x) ((x)|(x)<<4|(x)<<8|(x)<<12)
@@ -97,7 +92,6 @@ struct modex_params {
 	const struct modey_params *modey;
 };
 
-#ifdef HAS_VIDC20
 /*
  * VIDC20 registers
  */
@@ -165,5 +159,3 @@ struct modex_params {
 #define VIDC20_DCTL_VRAM_PXCLK	(1 << 18)
 #define VIDC20_DCTL_VRAM_PXCLK2	(2 << 18)
 #define VIDC20_DCTL_VRAM_PXCLK4	(3 << 18)
-
-#endif

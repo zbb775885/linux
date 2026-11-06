@@ -37,7 +37,7 @@ void *ife_encode(struct sk_buff *skb, u16 metalen)
 	 * where ORIGDATA = original ethernet header ...
 	 */
 	int hdrm = metalen + IFE_METAHDRLEN;
-	int total_push = hdrm + skb->dev->hard_header_len;
+	int total_push = hdrm + ETH_HLEN;
 	struct ifeheadr *ifehdr;
 	struct ethhdr *iethh;	/* inner ether header */
 	int skboff = 0;
@@ -50,9 +50,9 @@ void *ife_encode(struct sk_buff *skb, u16 metalen)
 	iethh = (struct ethhdr *) skb->data;
 
 	__skb_push(skb, total_push);
-	memcpy(skb->data, iethh, skb->dev->hard_header_len);
+	memcpy(skb->data, iethh, ETH_HLEN);
 	skb_reset_mac_header(skb);
-	skboff += skb->dev->hard_header_len;
+	skboff += ETH_HLEN;
 
 	/* total metadata length */
 	ifehdr = (struct ifeheadr *) (skb->data + skboff);
@@ -69,16 +69,20 @@ void *ife_decode(struct sk_buff *skb, u16 *metalen)
 	int total_pull;
 	u16 ifehdrln;
 
-	ifehdr = (struct ifeheadr *) (skb->data + skb->dev->hard_header_len);
+	if (!pskb_may_pull(skb, ETH_HLEN + IFE_METAHDRLEN))
+		return NULL;
+
+	ifehdr = (struct ifeheadr *)(skb->data + ETH_HLEN);
 	ifehdrln = ntohs(ifehdr->metalen);
-	total_pull = skb->dev->hard_header_len + ifehdrln;
+	total_pull = ETH_HLEN + ifehdrln;
 
 	if (unlikely(ifehdrln < 2))
 		return NULL;
 
-	if (unlikely(!pskb_may_pull(skb, total_pull)))
+	if (unlikely(!pskb_may_pull(skb, total_pull + ETH_HLEN)))
 		return NULL;
 
+	ifehdr = (struct ifeheadr *)(skb->data + ETH_HLEN);
 	skb_set_mac_header(skb, total_pull);
 	__skb_pull(skb, total_pull);
 	*metalen = ifehdrln - IFE_METAHDRLEN;
@@ -92,12 +96,43 @@ struct meta_tlvhdr {
 	__be16 len;
 };
 
+static bool __ife_tlv_meta_valid(const unsigned char *skbdata,
+				 const unsigned char *ifehdr_end)
+{
+	const struct meta_tlvhdr *tlv;
+	u16 tlvlen;
+
+	if (unlikely(skbdata + sizeof(*tlv) > ifehdr_end))
+		return false;
+
+	tlv = (const struct meta_tlvhdr *)skbdata;
+	tlvlen = ntohs(tlv->len);
+
+	/* tlv length field is inc header, check on minimum */
+	if (tlvlen < NLA_HDRLEN)
+		return false;
+
+	/* overflow by NLA_ALIGN check */
+	if (NLA_ALIGN(tlvlen) < tlvlen)
+		return false;
+
+	if (unlikely(skbdata + NLA_ALIGN(tlvlen) > ifehdr_end))
+		return false;
+
+	return true;
+}
+
 /* Caller takes care of presenting data in network order
  */
-void *ife_tlv_meta_decode(void *skbdata, u16 *attrtype, u16 *dlen, u16 *totlen)
+void *ife_tlv_meta_decode(void *skbdata, const void *ifehdr_end, u16 *attrtype,
+			  u16 *dlen, u16 *totlen)
 {
-	struct meta_tlvhdr *tlv = (struct meta_tlvhdr *) skbdata;
+	struct meta_tlvhdr *tlv;
 
+	if (!__ife_tlv_meta_valid(skbdata, ifehdr_end))
+		return NULL;
+
+	tlv = (struct meta_tlvhdr *)skbdata;
 	*dlen = ntohs(tlv->len) - NLA_HDRLEN;
 	*attrtype = ntohs(tlv->type);
 

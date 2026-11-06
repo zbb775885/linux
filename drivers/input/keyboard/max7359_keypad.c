@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * max7359_keypad.c - MAX7359 Key Switch Controller Driver
  *
@@ -5,10 +6,6 @@
  * Kim Kyuwon <q1.kim@samsung.com>
  *
  * Based on pxa27x_keypad.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * Datasheet: http://www.maxim-ic.com/quick_view2.cfm/qv_pk/5456
  */
@@ -158,8 +155,7 @@ static void max7359_initialize(struct i2c_client *client)
 	max7359_fall_deepsleep(client);
 }
 
-static int max7359_probe(struct i2c_client *client,
-					const struct i2c_device_id *id)
+static int max7359_probe(struct i2c_client *client)
 {
 	const struct matrix_keymap_data *keymap_data =
 			dev_get_platdata(&client->dev);
@@ -202,7 +198,6 @@ static int max7359_probe(struct i2c_client *client,
 	input_dev->id.bustype = BUS_I2C;
 	input_dev->open = max7359_open;
 	input_dev->close = max7359_close;
-	input_dev->dev.parent = &client->dev;
 
 	input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REP);
 	input_dev->keycodesize = sizeof(keypad->keycodes[0]);
@@ -246,7 +241,6 @@ static int max7359_probe(struct i2c_client *client,
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
 static int max7359_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
@@ -271,12 +265,11 @@ static int max7359_resume(struct device *dev)
 
 	return 0;
 }
-#endif
 
-static SIMPLE_DEV_PM_OPS(max7359_pm, max7359_suspend, max7359_resume);
+static DEFINE_SIMPLE_DEV_PM_OPS(max7359_pm, max7359_suspend, max7359_resume);
 
 static const struct i2c_device_id max7359_ids[] = {
-	{ "max7359", 0 },
+	{ .name = "max7359" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, max7359_ids);
@@ -284,7 +277,7 @@ MODULE_DEVICE_TABLE(i2c, max7359_ids);
 static struct i2c_driver max7359_i2c_driver = {
 	.driver = {
 		.name = "max7359",
-		.pm   = &max7359_pm,
+		.pm   = pm_sleep_ptr(&max7359_pm),
 	},
 	.probe		= max7359_probe,
 	.id_table	= max7359_ids,

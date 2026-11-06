@@ -1,22 +1,11 @@
-/**
- * Cadence GEM PCI wrapper.
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * DOC: Cadence GEM PCI wrapper.
  *
- * Copyright (C) 2016 Cadence Design Systems - http://www.cadence.com
+ * Copyright (C) 2016 Cadence Design Systems - https://www.cadence.com
  *
  * Authors: Rafal Ozieblo <rafalo@cadence.com>
  *	    Bartosz Folta <bfolta@cadence.com>
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2  of
- * the License as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/clk.h>
@@ -24,61 +13,59 @@
 #include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/pci.h>
-#include <linux/platform_data/macb.h>
 #include <linux/platform_device.h>
 #include "macb.h"
 
 #define PCI_DRIVER_NAME "macb_pci"
 #define PLAT_DRIVER_NAME "macb"
 
-#define CDNS_VENDOR_ID 0x17cd
-#define CDNS_DEVICE_ID 0xe007
+#define PCI_DEVICE_ID_CDNS_MACB 0xe007
 
 #define GEM_PCLK_RATE 50000000
 #define GEM_HCLK_RATE 50000000
 
-static int macb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+static int macb_probe(struct pci_dev *pci, const struct pci_device_id *id)
 {
 	int err;
-	struct platform_device *plat_dev;
+	struct platform_device *pdev;
 	struct platform_device_info plat_info;
 	struct macb_platform_data plat_data;
 	struct resource res[2];
 
 	/* enable pci device */
-	err = pcim_enable_device(pdev);
+	err = pcim_enable_device(pci);
 	if (err < 0) {
-		dev_err(&pdev->dev, "Enabling PCI device has failed: %d", err);
+		dev_err(&pci->dev, "Enabling PCI device has failed: %d", err);
 		return err;
 	}
 
-	pci_set_master(pdev);
+	pci_set_master(pci);
 
 	/* set up resources */
 	memset(res, 0x00, sizeof(struct resource) * ARRAY_SIZE(res));
-	res[0].start = pci_resource_start(pdev, 0);
-	res[0].end = pci_resource_end(pdev, 0);
+	res[0].start = pci_resource_start(pci, 0);
+	res[0].end = pci_resource_end(pci, 0);
 	res[0].name = PCI_DRIVER_NAME;
 	res[0].flags = IORESOURCE_MEM;
-	res[1].start = pci_irq_vector(pdev, 0);
+	res[1].start = pci_irq_vector(pci, 0);
 	res[1].name = PCI_DRIVER_NAME;
 	res[1].flags = IORESOURCE_IRQ;
 
-	dev_info(&pdev->dev, "EMAC physical base addr: %pa\n",
+	dev_info(&pci->dev, "EMAC physical base addr: %pa\n",
 		 &res[0].start);
 
 	/* set up macb platform data */
 	memset(&plat_data, 0, sizeof(plat_data));
 
 	/* initialize clocks */
-	plat_data.pclk = clk_register_fixed_rate(&pdev->dev, "pclk", NULL, 0,
+	plat_data.pclk = clk_register_fixed_rate(&pci->dev, "pclk", NULL, 0,
 						 GEM_PCLK_RATE);
 	if (IS_ERR(plat_data.pclk)) {
 		err = PTR_ERR(plat_data.pclk);
 		goto err_pclk_register;
 	}
 
-	plat_data.hclk = clk_register_fixed_rate(&pdev->dev, "hclk", NULL, 0,
+	plat_data.hclk = clk_register_fixed_rate(&pci->dev, "hclk", NULL, 0,
 						 GEM_HCLK_RATE);
 	if (IS_ERR(plat_data.hclk)) {
 		err = PTR_ERR(plat_data.hclk);
@@ -87,49 +74,51 @@ static int macb_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	/* set up platform device info */
 	memset(&plat_info, 0, sizeof(plat_info));
-	plat_info.parent = &pdev->dev;
-	plat_info.fwnode = pdev->dev.fwnode;
+	plat_info.parent = &pci->dev;
+	plat_info.fwnode = pci->dev.fwnode;
 	plat_info.name = PLAT_DRIVER_NAME;
-	plat_info.id = pdev->devfn;
+	plat_info.id = pci->devfn;
 	plat_info.res = res;
 	plat_info.num_res = ARRAY_SIZE(res);
 	plat_info.data = &plat_data;
 	plat_info.size_data = sizeof(plat_data);
-	plat_info.dma_mask = pdev->dma_mask;
+	plat_info.dma_mask = pci->dma_mask;
 
 	/* register platform device */
-	plat_dev = platform_device_register_full(&plat_info);
-	if (IS_ERR(plat_dev)) {
-		err = PTR_ERR(plat_dev);
+	pdev = platform_device_register_full(&plat_info);
+	if (IS_ERR(pdev)) {
+		err = PTR_ERR(pdev);
 		goto err_plat_dev_register;
 	}
 
-	pci_set_drvdata(pdev, plat_dev);
+	pci_set_drvdata(pci, pdev);
 
 	return 0;
 
 err_plat_dev_register:
-	clk_unregister(plat_data.hclk);
+	clk_unregister_fixed_rate(plat_data.hclk);
 
 err_hclk_register:
-	clk_unregister(plat_data.pclk);
+	clk_unregister_fixed_rate(plat_data.pclk);
 
 err_pclk_register:
 	return err;
 }
 
-static void macb_remove(struct pci_dev *pdev)
+static void macb_remove(struct pci_dev *pci)
 {
-	struct platform_device *plat_dev = pci_get_drvdata(pdev);
-	struct macb_platform_data *plat_data = dev_get_platdata(&plat_dev->dev);
+	struct platform_device *pdev = pci_get_drvdata(pci);
+	struct macb_platform_data *plat_data = dev_get_platdata(&pdev->dev);
+	struct clk *pclk = plat_data->pclk;
+	struct clk *hclk = plat_data->hclk;
 
-	platform_device_unregister(plat_dev);
-	clk_unregister(plat_data->pclk);
-	clk_unregister(plat_data->hclk);
+	platform_device_unregister(pdev);
+	clk_unregister_fixed_rate(pclk);
+	clk_unregister_fixed_rate(hclk);
 }
 
 static const struct pci_device_id dev_id_table[] = {
-	{ PCI_DEVICE(CDNS_VENDOR_ID, CDNS_DEVICE_ID), },
+	{ PCI_VDEVICE(CDNS, PCI_DEVICE_ID_CDNS_MACB) },
 	{ 0, }
 };
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *
  * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
@@ -99,6 +100,8 @@
  *
  */
 
+#include <linux/aperture.h>
+#include <linux/export.h>
 #include <linux/version.h>
 
 #include "matroxfb_base.h"
@@ -111,12 +114,12 @@
 #include "matroxfb_g450.h"
 #include <linux/matroxfb.h>
 #include <linux/interrupt.h>
+#include <linux/nvram.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 
 #ifdef CONFIG_PPC_PMAC
 #include <asm/machdep.h>
-unsigned char nvram_read_byte(int);
 static int default_vmode = VMODE_NVRAM;
 static int default_cmode = CMODE_NVRAM;
 #endif
@@ -371,10 +374,6 @@ static void matroxfb_remove(struct matrox_fb_info *minfo, int dummy)
 	unregister_framebuffer(&minfo->fbcon);
 	matroxfb_g450_shutdown(minfo);
 	arch_phys_wc_del(minfo->wc_cookie);
-	iounmap(minfo->mmio.vbase.vaddr);
-	iounmap(minfo->video.vbase.vaddr);
-	release_mem_region(minfo->video.base, minfo->video.len_maximum);
-	release_mem_region(minfo->mmio.base, 16384);
 	kfree(minfo);
 }
 
@@ -1202,6 +1201,7 @@ static const struct fb_ops matroxfb_ops = {
 	.owner =	THIS_MODULE,
 	.fb_open =	matroxfb_open,
 	.fb_release =	matroxfb_release,
+	__FB_DEFAULT_IOMEM_OPS_RDWR,
 	.fb_check_var =	matroxfb_check_var,
 	.fb_set_par =	matroxfb_set_par,
 	.fb_setcolreg =	matroxfb_setcolreg,
@@ -1212,6 +1212,7 @@ static const struct fb_ops matroxfb_ops = {
 /*	.fb_copyarea =	<set by matrox_cfbX_init>, */
 /*	.fb_imageblit =	<set by matrox_cfbX_init>, */
 /*	.fb_cursor =	<set by matrox_cfbX_init>, */
+	__FB_DEFAULT_IOMEM_OPS_MMAP,
 };
 
 #define RSDepth(X)	(((X) >> 8) & 0x0F)
@@ -1375,6 +1376,12 @@ static struct video_board vbG200 = {
 	.accelID = FB_ACCEL_MATROX_MGAG200,
 	.lowlevel = &matrox_G100
 };
+static struct video_board vbG200eW = {
+	.maxvram = 0x1000000,
+	.maxdisplayable = 0x0800000,
+	.accelID = FB_ACCEL_MATROX_MGAG200,
+	.lowlevel = &matrox_G100
+};
 /* from doc it looks like that accelerator can draw only to low 16MB :-( Direct accesses & displaying are OK for
    whole 32MB */
 static struct video_board vbG400 = {
@@ -1493,6 +1500,13 @@ static struct board {
 		MGA_G200,
 		&vbG200,
 		"MGA-G200 (PCI)"},
+	{PCI_VENDOR_ID_MATROX,	0x0532,	0xFF,
+		0,			0,
+		DEVF_G200,
+		250000,
+		MGA_G200,
+		&vbG200eW,
+		"MGA-G200eW (PCI)"},
 	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_AGP,	0xFF,
 		PCI_SS_VENDOR_ID_MATROX,	PCI_SS_ID_MATROX_GENERIC,
 		DEVF_G200,
@@ -1624,8 +1638,8 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 	int err;
 
 	static const struct pci_device_id intel_82437[] = {
-		{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82437) },
-		{ },
+		{ PCI_VDEVICE(INTEL, PCI_DEVICE_ID_INTEL_82437) },
+		{ }
 	};
 
 	DBG(__func__)
@@ -1694,11 +1708,13 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 		goto fail;
 	}
 	memsize = b->base->maxvram;
-	if (!request_mem_region(ctrlptr_phys, 16384, "matroxfb MMIO")) {
+	if (!devm_request_mem_region(&minfo->pcidev->dev, ctrlptr_phys, 16384,
+				     "matroxfb MMIO")) {
 		goto fail;
 	}
-	if (!request_mem_region(video_base_phys, memsize, "matroxfb FB")) {
-		goto failCtrlMR;
+	if (!devm_request_mem_region(&minfo->pcidev->dev, video_base_phys,
+				     memsize, "matroxfb FB")) {
+		goto fail;
 	}
 	minfo->video.len_maximum = memsize;
 	/* convert mem (autodetect k, M) */
@@ -1709,19 +1725,19 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 		memsize = mem;
 	err = -ENOMEM;
 
-	minfo->mmio.vbase.vaddr = ioremap_nocache(ctrlptr_phys, 16384);
+	minfo->mmio.vbase.vaddr = devm_ioremap(&minfo->pcidev->dev, ctrlptr_phys, 16384);
 	if (!minfo->mmio.vbase.vaddr) {
 		printk(KERN_ERR "matroxfb: cannot ioremap(%lX, 16384), matroxfb disabled\n", ctrlptr_phys);
-		goto failVideoMR;
+		goto fail;
 	}
 	minfo->mmio.base = ctrlptr_phys;
 	minfo->mmio.len = 16384;
 	minfo->video.base = video_base_phys;
-	minfo->video.vbase.vaddr = ioremap_wc(video_base_phys, memsize);
+	minfo->video.vbase.vaddr = devm_ioremap_wc(&minfo->pcidev->dev, video_base_phys, memsize);
 	if (!minfo->video.vbase.vaddr) {
 		printk(KERN_ERR "matroxfb: cannot ioremap(%lX, %d), matroxfb disabled\n",
 			video_base_phys, memsize);
-		goto failCtrlIO;
+		goto fail;
 	}
 	{
 		u_int32_t cmd;
@@ -1872,10 +1888,11 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 #ifndef MODULE
 	if (machine_is(powermac)) {
 		struct fb_var_screeninfo var;
+
 		if (default_vmode <= 0 || default_vmode > VMODE_MAX)
 			default_vmode = VMODE_640_480_60;
-#ifdef CONFIG_NVRAM
-		if (default_cmode == CMODE_NVRAM)
+#if defined(CONFIG_PPC32)
+		if (IS_REACHABLE(CONFIG_NVRAM) && default_cmode == CMODE_NVRAM)
 			default_cmode = nvram_read_byte(NV_CMODE);
 #endif
 		if (default_cmode < CMODE_8 || default_cmode > CMODE_32)
@@ -1935,13 +1952,6 @@ static int initMatrox2(struct matrox_fb_info *minfo, struct board *b)
 	return 0;
 failVideoIO:;
 	matroxfb_g450_shutdown(minfo);
-	iounmap(minfo->video.vbase.vaddr);
-failCtrlIO:;
-	iounmap(minfo->mmio.vbase.vaddr);
-failVideoMR:;
-	release_mem_region(video_base_phys, minfo->video.len_maximum);
-failCtrlMR:;
-	release_mem_region(ctrlptr_phys, 16384);
 fail:;
 	return err;
 }
@@ -1955,9 +1965,7 @@ int matroxfb_register_driver(struct matroxfb_driver* drv) {
 	struct matrox_fb_info* minfo;
 
 	list_add(&drv->node, &matroxfb_driver_list);
-	for (minfo = matroxfb_l(matroxfb_list.next);
-	     minfo != matroxfb_l(&matroxfb_list);
-	     minfo = matroxfb_l(minfo->next_fb.next)) {
+	list_for_each_entry(minfo, &matroxfb_list, next_fb) {
 		void* p;
 
 		if (minfo->drivers_count == MATROXFB_MAX_FB_DRIVERS)
@@ -1975,9 +1983,7 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv) {
 	struct matrox_fb_info* minfo;
 
 	list_del(&drv->node);
-	for (minfo = matroxfb_l(matroxfb_list.next);
-	     minfo != matroxfb_l(&matroxfb_list);
-	     minfo = matroxfb_l(minfo->next_fb.next)) {
+	list_for_each_entry(minfo, &matroxfb_list, next_fb) {
 		int i;
 
 		for (i = 0; i < minfo->drivers_count; ) {
@@ -2033,6 +2039,10 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 	u_int32_t cmd;
 	DBG(__func__)
 
+	err = aperture_remove_conflicting_pci_devices(pdev, "matroxfb");
+	if (err)
+		return err;
+
 	svid = pdev->subsystem_vendor;
 	sid = pdev->subsystem_device;
 	for (b = dev_list; b->vendor; b++) {
@@ -2050,11 +2060,10 @@ static int matroxfb_probe(struct pci_dev* pdev, const struct pci_device_id* dumm
 		return -ENODEV;
 	}
 	pci_read_config_dword(pdev, PCI_COMMAND, &cmd);
-	if (pci_enable_device(pdev)) {
+	if (pcim_enable_device(pdev))
 		return -1;
-	}
 
-	minfo = kzalloc(sizeof(*minfo), GFP_KERNEL);
+	minfo = kzalloc_obj(*minfo);
 	if (!minfo)
 		return -ENOMEM;
 
@@ -2116,33 +2125,23 @@ static void pci_remove_matrox(struct pci_dev* pdev) {
 
 static const struct pci_device_id matroxfb_devices[] = {
 #ifdef CONFIG_FB_MATROX_MILLENIUM
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MIL_2_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL_2) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MIL_2_AGP) },
 #endif
 #ifdef CONFIG_FB_MATROX_MYSTIQUE
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_MYS,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_MYS) },
 #endif
 #ifdef CONFIG_FB_MATROX_G
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_MM,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G100_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_PCI,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G200_AGP,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G400,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
-	{PCI_VENDOR_ID_MATROX,	PCI_DEVICE_ID_MATROX_G550,
-		PCI_ANY_ID,	PCI_ANY_ID,	0, 0, 0},
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G100_MM) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G100_AGP) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G200_PCI) },
+	{ PCI_VDEVICE(MATROX, 0x0532) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G200_AGP) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G400) },
+	{ PCI_VDEVICE(MATROX, PCI_DEVICE_ID_MATROX_G550) },
 #endif
-	{0,			0,
-		0,		0,		0, 0, 0}
+	{ }
 };
 
 MODULE_DEVICE_TABLE(pci, matroxfb_devices);
@@ -2296,6 +2295,9 @@ static void __init matroxfb_init_params(void) {
 static int __init matrox_init(void) {
 	int err;
 
+	if (fb_modesetting_disabled("matroxfb"))
+		return -ENODEV;
+
 	matroxfb_init_params();
 	err = pci_register_driver(&matroxfb_driver);
 	dev = -1;	/* accept all new devices... */
@@ -2370,9 +2372,9 @@ static int __init matroxfb_setup(char *options) {
 		else if (!strncmp(this_opt, "mem:", 4))
 			mem = simple_strtoul(this_opt+4, NULL, 0);
 		else if (!strncmp(this_opt, "mode:", 5))
-			strlcpy(videomode, this_opt+5, sizeof(videomode));
+			strscpy(videomode, this_opt + 5, sizeof(videomode));
 		else if (!strncmp(this_opt, "outputs:", 8))
-			strlcpy(outputs, this_opt+8, sizeof(outputs));
+			strscpy(outputs, this_opt + 8, sizeof(outputs));
 		else if (!strncmp(this_opt, "dfp:", 4)) {
 			dfp_type = simple_strtoul(this_opt+4, NULL, 0);
 			dfp = 1;
@@ -2442,7 +2444,7 @@ static int __init matroxfb_setup(char *options) {
 			else if (!strcmp(this_opt, "dfp"))
 				dfp = value;
 			else {
-				strlcpy(videomode, this_opt, sizeof(videomode));
+				strscpy(videomode, this_opt, sizeof(videomode));
 			}
 		}
 	}
@@ -2473,8 +2475,6 @@ static int __init matroxfb_init(void)
 	return err;
 }
 
-module_init(matroxfb_init);
-
 #else
 
 /* *************************** init module code **************************** */
@@ -2500,7 +2500,7 @@ MODULE_PARM_DESC(nobios, "Disables ROM BIOS (0 or 1=disabled) (default=do not ch
 module_param(noinit, int, 0);
 MODULE_PARM_DESC(noinit, "Disables W/SG/SD-RAM and bus interface initialization (0 or 1=do not initialize) (default=0)");
 module_param(memtype, int, 0);
-MODULE_PARM_DESC(memtype, "Memory type for G200/G400 (see Documentation/fb/matroxfb.txt for explanation) (default=3 for G200, 0 for G400)");
+MODULE_PARM_DESC(memtype, "Memory type for G200/G400 (see Documentation/fb/matroxfb.rst for explanation) (default=3 for G200, 0 for G400)");
 module_param(mtrr, int, 0);
 MODULE_PARM_DESC(mtrr, "This speeds up video memory accesses (0=disabled or 1) (default=1)");
 module_param(sgram, int, 0);
@@ -2559,7 +2559,7 @@ module_param_named(cmode, default_cmode, int, 0);
 MODULE_PARM_DESC(cmode, "Specify the video depth that should be used (8bit default)");
 #endif
 
-int __init init_module(void){
+static int __init matroxfb_init(void){
 
 	DBG(__func__)
 
@@ -2590,17 +2590,9 @@ int __init init_module(void){
 }
 #endif	/* MODULE */
 
+module_init(matroxfb_init);
 module_exit(matrox_done);
 EXPORT_SYMBOL(matroxfb_register_driver);
 EXPORT_SYMBOL(matroxfb_unregister_driver);
 EXPORT_SYMBOL(matroxfb_wait_for_sync);
 EXPORT_SYMBOL(matroxfb_enable_irq);
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-basic-offset: 8
- * End:
- */
-

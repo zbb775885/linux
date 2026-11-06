@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * The register defines are based on earlier cpcap.h in Motorola Linux kernel
  * tree.
@@ -8,10 +9,6 @@
  * to make the defines usable with Linux kernel regmap support
  *
  * Copyright (C) 2016 Tony Lindgren <tony@atomide.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/device.h>
@@ -27,6 +24,13 @@
 #define CPCAP_REVISION_1_1	0x09
 #define CPCAP_REVISION_2_0	0x10
 #define CPCAP_REVISION_2_1	0x11
+
+enum cpcap_variant {
+	CPCAP_DEFAULT = 1,
+	CPCAP_MAPPHONE,
+	CPCAP_MOT,
+	CPCAP_MAX
+};
 
 /* CPCAP registers */
 #define CPCAP_REG_INT1		0x0000	/* Interrupt 1 */

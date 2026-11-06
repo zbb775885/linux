@@ -1,19 +1,9 @@
-/*
- * max14577.c - Regulator driver for the Maxim 14577/77836
- *
- * Copyright (C) 2013,2014 Samsung Electronics
- * Krzysztof Kozlowski <krzk@kernel.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+// SPDX-License-Identifier: GPL-2.0+
+//
+// max14577.c - Regulator driver for the Maxim 14577/77836
+//
+// Copyright (C) 2013,2014 Samsung Electronics
+// Krzysztof Kozlowski <krzk@kernel.org>
 
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -50,11 +40,14 @@ static int max14577_reg_get_current_limit(struct regulator_dev *rdev)
 	struct max14577 *max14577 = rdev_get_drvdata(rdev);
 	const struct maxim_charger_current *limits =
 		&maxim_charger_currents[max14577->dev_type];
+	int ret;
 
 	if (rdev_get_id(rdev) != MAX14577_CHARGER)
 		return -EINVAL;
 
-	max14577_read_reg(rmap, MAX14577_CHG_REG_CHG_CTRL4, &reg_data);
+	ret = max14577_read_reg(rmap, MAX14577_CHG_REG_CHG_CTRL4, &reg_data);
+	if (ret < 0)
+		return ret;
 
 	if ((reg_data & CHGCTRL4_MBCICHWRCL_MASK) == 0)
 		return limits->min;
@@ -130,15 +123,88 @@ static const struct regulator_desc max14577_supported_regulators[] = {
 	[MAX14577_CHARGER] = MAX14577_CHARGER_REG,
 };
 
+struct max77836_ldo {
+	struct max14577	*max14577;
+	unsigned int	mode;
+};
+
+static int max77836_ldo_enable(struct regulator_dev *rdev)
+{
+	struct max77836_ldo *ldo = rdev_get_drvdata(rdev);
+
+	return regmap_update_bits(rdev->regmap, rdev->desc->enable_reg,
+			MAX77836_CNFG1_LDO_PWRMD_MASK, ldo->mode);
+}
+
+static int max77836_ldo_disable(struct regulator_dev *rdev)
+{
+	return regmap_update_bits(rdev->regmap, rdev->desc->enable_reg,
+			MAX77836_CNFG1_LDO_PWRMD_MASK,
+			MAX77836_CNFG1_LDO_PWRMD_OFF);
+}
+
+static unsigned int max77836_ldo_get_mode(struct regulator_dev *rdev)
+{
+	struct max77836_ldo *ldo = rdev_get_drvdata(rdev);
+
+	switch (ldo->mode) {
+	case MAX77836_CNFG1_LDO_PWRMD_LPM:
+		return REGULATOR_MODE_IDLE;
+	case MAX77836_CNFG1_LDO_PWRMD_NORMAL:
+		return REGULATOR_MODE_NORMAL;
+	default:
+		return REGULATOR_MODE_INVALID;
+	}
+}
+
+static int max77836_ldo_set_mode(struct regulator_dev *rdev,
+				 unsigned int mode)
+{
+	struct max77836_ldo *ldo = rdev_get_drvdata(rdev);
+	unsigned int val;
+
+	switch (mode) {
+	case REGULATOR_MODE_NORMAL:
+		val = MAX77836_CNFG1_LDO_PWRMD_NORMAL;
+		break;
+	case REGULATOR_MODE_IDLE:
+		val = MAX77836_CNFG1_LDO_PWRMD_LPM;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ldo->mode = val;
+
+	/* Only touch hardware if the regulator is already on */
+	if (regulator_is_enabled_regmap(rdev))
+		return regmap_update_bits(rdev->regmap, rdev->desc->enable_reg,
+				MAX77836_CNFG1_LDO_PWRMD_MASK, val);
+
+	return 0;
+}
+
+static unsigned int max77836_ldo_of_map_mode(unsigned int mode)
+{
+	switch (mode) {
+	case REGULATOR_MODE_NORMAL:
+	case REGULATOR_MODE_IDLE:
+		return mode;
+	default:
+		return REGULATOR_MODE_INVALID;
+	}
+}
+
 static const struct regulator_ops max77836_ldo_ops = {
 	.is_enabled		= regulator_is_enabled_regmap,
-	.enable			= regulator_enable_regmap,
-	.disable		= regulator_disable_regmap,
+	.enable			= max77836_ldo_enable,
+	.disable		= max77836_ldo_disable,
 	.list_voltage		= regulator_list_voltage_linear,
 	.map_voltage		= regulator_map_voltage_linear,
 	.get_voltage_sel	= regulator_get_voltage_sel_regmap,
 	.set_voltage_sel	= regulator_set_voltage_sel_regmap,
-	/* TODO: add .set_suspend_mode */
+	.get_mode		= max77836_ldo_get_mode,
+	.set_mode		= max77836_ldo_set_mode,
 };
 
 #define MAX77836_LDO_REG(num)	{ \
@@ -154,6 +220,7 @@ static const struct regulator_ops max77836_ldo_ops = {
 	.uV_step	= MAX77836_REGULATOR_LDO_VOLTAGE_STEP, \
 	.enable_reg	= MAX77836_LDO_REG_CNFG1_LDO ## num, \
 	.enable_mask	= MAX77836_CNFG1_LDO_PWRMD_MASK, \
+	.of_map_mode	= max77836_ldo_of_map_mode, \
 	.vsel_reg	= MAX77836_LDO_REG_CNFG1_LDO ## num, \
 	.vsel_mask	= MAX77836_CNFG1_LDO_TV_MASK, \
 }
@@ -165,59 +232,7 @@ static const struct regulator_desc max77836_supported_regulators[] = {
 	[MAX77836_LDO2] = MAX77836_LDO_REG(2),
 };
 
-#ifdef CONFIG_OF
-static struct of_regulator_match max14577_regulator_matches[] = {
-	{ .name	= "SAFEOUT", },
-	{ .name = "CHARGER", },
-};
-
-static struct of_regulator_match max77836_regulator_matches[] = {
-	{ .name	= "SAFEOUT", },
-	{ .name = "CHARGER", },
-	{ .name = "LDO1", },
-	{ .name = "LDO2", },
-};
-
-static inline struct regulator_init_data *match_init_data(int index,
-		enum maxim_device_type dev_type)
-{
-	switch (dev_type) {
-	case MAXIM_DEVICE_TYPE_MAX77836:
-		return max77836_regulator_matches[index].init_data;
-
-	case MAXIM_DEVICE_TYPE_MAX14577:
-	default:
-		return max14577_regulator_matches[index].init_data;
-	}
-}
-
-static inline struct device_node *match_of_node(int index,
-		enum maxim_device_type dev_type)
-{
-	switch (dev_type) {
-	case MAXIM_DEVICE_TYPE_MAX77836:
-		return max77836_regulator_matches[index].of_node;
-
-	case MAXIM_DEVICE_TYPE_MAX14577:
-	default:
-		return max14577_regulator_matches[index].of_node;
-	}
-}
-#else /* CONFIG_OF */
-static inline struct regulator_init_data *match_init_data(int index,
-		enum maxim_device_type dev_type)
-{
-	return NULL;
-}
-
-static inline struct device_node *match_of_node(int index,
-		enum maxim_device_type dev_type)
-{
-	return NULL;
-}
-#endif /* CONFIG_OF */
-
-/**
+/*
  * Registers for regulators of max77836 use different I2C slave addresses so
  * different regmaps must be used for them.
  *
@@ -264,7 +279,6 @@ static int max14577_regulator_probe(struct platform_device *pdev)
 	}
 
 	config.dev = max14577->dev;
-	config.driver_data = max14577;
 
 	for (i = 0; i < supported_regulators_size; i++) {
 		struct regulator_dev *regulator;
@@ -275,10 +289,29 @@ static int max14577_regulator_probe(struct platform_device *pdev)
 		if (pdata && pdata->regulators) {
 			config.init_data = pdata->regulators[i].initdata;
 			config.of_node = pdata->regulators[i].of_node;
-		} else {
-			config.init_data = match_init_data(i, dev_type);
-			config.of_node = match_of_node(i, dev_type);
 		}
+
+		/*
+		 * LDOs need per-regulator driver data to store their mode.
+		 * The charger and safeout share the core MFD struct.
+		 */
+		if (dev_type == MAXIM_DEVICE_TYPE_MAX77836 &&
+		    (supported_regulators[i].id == MAX77836_LDO1 ||
+		     supported_regulators[i].id == MAX77836_LDO2)) {
+			struct max77836_ldo *ldo;
+
+			ldo = devm_kzalloc(&pdev->dev, sizeof(*ldo),
+					   GFP_KERNEL);
+			if (!ldo)
+				return -ENOMEM;
+
+			ldo->max14577 = max14577;
+			ldo->mode = MAX77836_CNFG1_LDO_PWRMD_NORMAL;
+			config.driver_data = ldo;
+		} else {
+			config.driver_data = max14577;
+		}
+
 		config.regmap = max14577_get_regmap(max14577,
 				supported_regulators[i].id);
 
@@ -297,8 +330,8 @@ static int max14577_regulator_probe(struct platform_device *pdev)
 }
 
 static const struct platform_device_id max14577_regulator_id[] = {
-	{ "max14577-regulator", MAXIM_DEVICE_TYPE_MAX14577, },
-	{ "max77836-regulator", MAXIM_DEVICE_TYPE_MAX77836, },
+	{ .name = "max14577-regulator", .driver_data = MAXIM_DEVICE_TYPE_MAX14577 },
+	{ .name = "max77836-regulator", .driver_data = MAXIM_DEVICE_TYPE_MAX77836 },
 	{ }
 };
 MODULE_DEVICE_TABLE(platform, max14577_regulator_id);
@@ -306,6 +339,7 @@ MODULE_DEVICE_TABLE(platform, max14577_regulator_id);
 static struct platform_driver max14577_regulator_driver = {
 	.driver = {
 		   .name = "max14577-regulator",
+		   .probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		   },
 	.probe		= max14577_regulator_probe,
 	.id_table	= max14577_regulator_id,
@@ -334,4 +368,3 @@ module_exit(max14577_regulator_exit);
 MODULE_AUTHOR("Krzysztof Kozlowski <krzk@kernel.org>");
 MODULE_DESCRIPTION("Maxim 14577/77836 regulator driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:max14577-regulator");

@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mmp AXI peripharal clock operation source file
  *
  * Copyright (C) 2012 Marvell
  * Chao Xie <xiechao.mail@gmail.com>
- *
- * This file is licensed under the terms of the GNU General Public
- * License version 2. This program is licensed "as is" without any
- * warranty of any kind, whether express or implied.
  */
 
 #include <linux/kernel.h>
@@ -68,11 +65,11 @@ static const struct clk_ops clk_apmu_ops = {
 struct clk *mmp_clk_register_apmu(const char *name, const char *parent_name,
 		void __iomem *base, u32 enable_mask, spinlock_t *lock)
 {
+	struct clk_init_data init = {};
 	struct clk_apmu *apmu;
 	struct clk *clk;
-	struct clk_init_data init;
 
-	apmu = kzalloc(sizeof(*apmu), GFP_KERNEL);
+	apmu = kzalloc_obj(*apmu);
 	if (!apmu)
 		return NULL;
 

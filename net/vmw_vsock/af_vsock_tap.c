@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Tap functions for AF_VSOCK sockets.
  *
  * Code based on net/netlink/af_netlink.c tap functions.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/module.h>
@@ -68,14 +64,10 @@ static int __vsock_deliver_tap_skb(struct sk_buff *skb,
 	struct sk_buff *nskb = skb_clone(skb, GFP_ATOMIC);
 
 	if (nskb) {
-		dev_hold(dev);
-
 		nskb->dev = dev;
 		ret = dev_queue_xmit(nskb);
 		if (unlikely(ret > 0))
 			ret = net_xmit_errno(ret);
-
-		dev_put(dev);
 	}
 
 	return ret;

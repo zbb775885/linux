@@ -1,18 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * adv7343 - ADV7343 Video Encoder Driver
  *
  * The encoder hardware does not support SECAM.
  *
  * Copyright (C) 2009 Texas Instruments Incorporated - http://www.ti.com/
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation version 2.
- *
- * This program is distributed .as is. WITHOUT ANY WARRANTY of any
- * kind, whether express or implied; without even the implied warranty
- * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
 #include <linux/kernel.h>
@@ -403,7 +395,7 @@ adv7343_get_pdata(struct i2c_client *client)
 	if (!IS_ENABLED(CONFIG_OF) || !client->dev.of_node)
 		return client->dev.platform_data;
 
-	np = of_graph_get_next_endpoint(client->dev.of_node, NULL);
+	np = of_graph_get_endpoint_by_regs(client->dev.of_node, 0, -1);
 	if (!np)
 		return NULL;
 
@@ -428,8 +420,7 @@ done:
 	return pdata;
 }
 
-static int adv7343_probe(struct i2c_client *client,
-				const struct i2c_device_id *id)
+static int adv7343_probe(struct i2c_client *client)
 {
 	struct adv7343_state *state;
 	int err;
@@ -493,20 +484,18 @@ done:
 	return err;
 }
 
-static int adv7343_remove(struct i2c_client *client)
+static void adv7343_remove(struct i2c_client *client)
 {
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct adv7343_state *state = to_state(sd);
 
 	v4l2_async_unregister_subdev(&state->sd);
 	v4l2_ctrl_handler_free(&state->hdl);
-
-	return 0;
 }
 
 static const struct i2c_device_id adv7343_id[] = {
-	{"adv7343", 0},
-	{},
+	{ .name = "adv7343" },
+	{ }
 };
 
 MODULE_DEVICE_TABLE(i2c, adv7343_id);

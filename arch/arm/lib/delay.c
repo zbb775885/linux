@@ -1,20 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Delay loops based on the OpenRISC implementation.
  *
  * Copyright (C) 2012 ARM Limited
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  *
  * Author: Will Deacon <will.deacon@arm.com>
  */
@@ -24,7 +12,6 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/timex.h>
 
 /*
  * Default to the loop-based delay implementation.
@@ -39,15 +26,14 @@ static const struct delay_timer *delay_timer;
 static bool delay_calibrated;
 static u64 delay_res;
 
-int read_current_timer(unsigned long *timer_val)
+bool delay_read_timer(unsigned long *timer_val)
 {
 	if (!delay_timer)
-		return -ENXIO;
-
+		return false;
 	*timer_val = delay_timer->read_current_timer();
-	return 0;
+	return true;
 }
-EXPORT_SYMBOL_GPL(read_current_timer);
+EXPORT_SYMBOL_GPL(delay_read_timer);
 
 static inline u64 cyc_to_ns(u64 cyc, u32 mult, u32 shift)
 {

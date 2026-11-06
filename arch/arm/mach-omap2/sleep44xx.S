@@ -1,18 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * OMAP44xx sleep code.
  *
  * Copyright (C) 2011 Texas Instruments, Inc.
  * 	Santosh Shilimkar <santosh.shilimkar@ti.com>
- *
- * This program is free software,you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
+#include <linux/cfi_types.h>
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/smp_scu.h>
-#include <asm/memory.h>
+#include <asm/page.h>
 #include <asm/hardware/cache-l2x0.h>
 
 #include "omap-secure.h"
@@ -21,8 +19,11 @@
 #include "omap44xx.h"
 #include "omap4-sar-layout.h"
 
+	.arch armv7-a
+
 #if defined(CONFIG_SMP) && defined(CONFIG_PM)
 
+	.arch_extension sec
 .macro	DO_SMC
 	dsb
 	smc	#0
@@ -58,7 +59,7 @@
  * stack frame and it expects the caller to take care of it. Hence the entire
  * stack frame is saved to avoid possible stack corruption.
  */
-ENTRY(omap4_finish_suspend)
+SYM_TYPED_FUNC_START(omap4_finish_suspend)
 	stmfd	sp!, {r4-r12, lr}
 	cmp	r0, #0x0
 	beq	do_WFI				@ No lowpower state, jump to WFI
@@ -90,12 +91,7 @@ skip_secure_l1_clean:
 	mcr	p15, 0, r0, c1, c0, 0
 	isb
 
-	/*
-	 * Invalidate L1 data cache. Even though only invalidate is
-	 * necessary exported flush API is used here. Doing clean
-	 * on already clean cache would be almost NOP.
-	 */
-	bl	v7_flush_dcache_all
+	bl	v7_invalidate_l1
 
 	/*
 	 * Switch the CPU from Symmetric Multiprocessing (SMP) mode
@@ -228,7 +224,7 @@ skip_scu_gp_clear:
 	isb
 	dsb
 	ldmfd	sp!, {r4-r12, pc}
-ENDPROC(omap4_finish_suspend)
+SYM_FUNC_END(omap4_finish_suspend)
 
 /*
  * ============================

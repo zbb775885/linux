@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Codec driver for ST STA350 2.1-channel high-efficiency digital audio system
  *
@@ -11,23 +12,18 @@
  *	  Mark Brown <broonie@opensource.wolfsonmicro.com>
  *	Freescale Semiconductor, Inc.
  *	  Timur Tabi <timur@freescale.com>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s:%d: " fmt, __func__, __LINE__
 
+#include <linux/cleanup.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/i2c.h>
-#include <linux/of_device.h>
-#include <linux/of_gpio.h>
+#include <linux/of.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
 #include <linux/gpio/consumer.h>
@@ -52,12 +48,9 @@
 		      SNDRV_PCM_RATE_192000)
 
 #define STA350_FORMATS \
-	(SNDRV_PCM_FMTBIT_S16_LE  | SNDRV_PCM_FMTBIT_S16_BE  | \
-	 SNDRV_PCM_FMTBIT_S18_3LE | SNDRV_PCM_FMTBIT_S18_3BE | \
-	 SNDRV_PCM_FMTBIT_S20_3LE | SNDRV_PCM_FMTBIT_S20_3BE | \
-	 SNDRV_PCM_FMTBIT_S24_3LE | SNDRV_PCM_FMTBIT_S24_3BE | \
-	 SNDRV_PCM_FMTBIT_S24_LE  | SNDRV_PCM_FMTBIT_S24_BE  | \
-	 SNDRV_PCM_FMTBIT_S32_LE  | SNDRV_PCM_FMTBIT_S32_BE)
+	(SNDRV_PCM_FMTBIT_S16_LE  | SNDRV_PCM_FMTBIT_S18_3LE | \
+	 SNDRV_PCM_FMTBIT_S20_3LE | SNDRV_PCM_FMTBIT_S24_3LE | \
+	 SNDRV_PCM_FMTBIT_S24_LE  | SNDRV_PCM_FMTBIT_S32_LE)
 
 /* Power-up register defaults */
 static const struct reg_default sta350_regs[] = {
@@ -309,14 +302,14 @@ static int sta350_coefficient_info(struct snd_kcontrol *kcontrol,
 static int sta350_coefficient_get(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	int numcoef = kcontrol->private_value >> 16;
 	int index = kcontrol->private_value & 0xffff;
 	unsigned int cfud, val;
-	int i, ret = 0;
+	int i;
 
-	mutex_lock(&sta350->coeff_lock);
+	guard(mutex)(&sta350->coeff_lock);
 
 	/* preserve reserved bits in STA350_CFUD */
 	regmap_read(sta350->regmap, STA350_CFUD, &cfud);
@@ -328,31 +321,26 @@ static int sta350_coefficient_get(struct snd_kcontrol *kcontrol,
 	regmap_write(sta350->regmap, STA350_CFUD, cfud);
 
 	regmap_write(sta350->regmap, STA350_CFADDR2, index);
-	if (numcoef == 1) {
+	if (numcoef == 1)
 		regmap_write(sta350->regmap, STA350_CFUD, cfud | 0x04);
-	} else if (numcoef == 5) {
+	else if (numcoef == 5)
 		regmap_write(sta350->regmap, STA350_CFUD, cfud | 0x08);
-	} else {
-		ret = -EINVAL;
-		goto exit_unlock;
-	}
+	else
+		return -EINVAL;
 
 	for (i = 0; i < 3 * numcoef; i++) {
 		regmap_read(sta350->regmap, STA350_B1CF1 + i, &val);
 		ucontrol->value.bytes.data[i] = val;
 	}
 
-exit_unlock:
-	mutex_unlock(&sta350->coeff_lock);
-
-	return ret;
+	return 0;
 }
 
 static int sta350_coefficient_put(struct snd_kcontrol *kcontrol,
 				  struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_codec *codec = snd_soc_kcontrol_codec(kcontrol);
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	int numcoef = kcontrol->private_value >> 16;
 	int index = kcontrol->private_value & 0xffff;
 	unsigned int cfud;
@@ -386,9 +374,9 @@ static int sta350_coefficient_put(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static int sta350_sync_coef_shadow(struct snd_soc_codec *codec)
+static int sta350_sync_coef_shadow(struct snd_soc_component *component)
 {
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	unsigned int cfud;
 	int i;
 
@@ -414,16 +402,16 @@ static int sta350_sync_coef_shadow(struct snd_soc_codec *codec)
 	return 0;
 }
 
-static int sta350_cache_sync(struct snd_soc_codec *codec)
+static int sta350_cache_sync(struct snd_soc_component *component)
 {
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	unsigned int mute;
 	int rc;
 
 	/* mute during register sync */
 	regmap_read(sta350->regmap, STA350_CFUD, &mute);
 	regmap_write(sta350->regmap, STA350_MMUTE, mute | STA350_MMUTE_MMUTE);
-	sta350_sync_coef_shadow(codec);
+	sta350_sync_coef_shadow(component);
 	rc = regcache_sync(sta350->regmap);
 	regmap_write(sta350->regmap, STA350_MMUTE, mute);
 	return rc;
@@ -489,9 +477,9 @@ SOC_SINGLE("Ch2 EQ Bypass Switch",
 SOC_SINGLE("Ch1 Master Volume Bypass Switch",
 	   STA350_C1CFG, STA350_CxCFG_VBP_SHIFT, 1, 0),
 SOC_SINGLE("Ch2 Master Volume Bypass Switch",
-	   STA350_C1CFG, STA350_CxCFG_VBP_SHIFT, 1, 0),
+	   STA350_C2CFG, STA350_CxCFG_VBP_SHIFT, 1, 0),
 SOC_SINGLE("Ch3 Master Volume Bypass Switch",
-	   STA350_C1CFG, STA350_CxCFG_VBP_SHIFT, 1, 0),
+	   STA350_C3CFG, STA350_CxCFG_VBP_SHIFT, 1, 0),
 SOC_ENUM("Ch1 Binary Output Select", sta350_binary_output_ch1_enum),
 SOC_ENUM("Ch2 Binary Output Select", sta350_binary_output_ch2_enum),
 SOC_ENUM("Ch3 Binary Output Select", sta350_binary_output_ch3_enum),
@@ -514,28 +502,28 @@ SOC_ENUM("Limiter2 Release Rate (dB/ms)", sta350_limiter2_release_rate_enum),
  */
 SOC_SINGLE_TLV("Limiter1 Attack Threshold (AC Mode)",
 	       STA350_L1ATRT, STA350_LxA_SHIFT,
-	       16, 0, sta350_limiter_ac_attack_tlv),
+	       15, 0, sta350_limiter_ac_attack_tlv),
 SOC_SINGLE_TLV("Limiter2 Attack Threshold (AC Mode)",
 	       STA350_L2ATRT, STA350_LxA_SHIFT,
-	       16, 0, sta350_limiter_ac_attack_tlv),
+	       15, 0, sta350_limiter_ac_attack_tlv),
 SOC_SINGLE_TLV("Limiter1 Release Threshold (AC Mode)",
 	       STA350_L1ATRT, STA350_LxR_SHIFT,
-	       16, 0, sta350_limiter_ac_release_tlv),
+	       15, 0, sta350_limiter_ac_release_tlv),
 SOC_SINGLE_TLV("Limiter2 Release Threshold (AC Mode)",
 	       STA350_L2ATRT, STA350_LxR_SHIFT,
-	       16, 0, sta350_limiter_ac_release_tlv),
+	       15, 0, sta350_limiter_ac_release_tlv),
 SOC_SINGLE_TLV("Limiter1 Attack Threshold (DRC Mode)",
 	       STA350_L1ATRT, STA350_LxA_SHIFT,
-	       16, 0, sta350_limiter_drc_attack_tlv),
+	       15, 0, sta350_limiter_drc_attack_tlv),
 SOC_SINGLE_TLV("Limiter2 Attack Threshold (DRC Mode)",
 	       STA350_L2ATRT, STA350_LxA_SHIFT,
-	       16, 0, sta350_limiter_drc_attack_tlv),
+	       15, 0, sta350_limiter_drc_attack_tlv),
 SOC_SINGLE_TLV("Limiter1 Release Threshold (DRC Mode)",
 	       STA350_L1ATRT, STA350_LxR_SHIFT,
-	       16, 0, sta350_limiter_drc_release_tlv),
+	       15, 0, sta350_limiter_drc_release_tlv),
 SOC_SINGLE_TLV("Limiter2 Release Threshold (DRC Mode)",
 	       STA350_L2ATRT, STA350_LxR_SHIFT,
-	       16, 0, sta350_limiter_drc_release_tlv),
+	       15, 0, sta350_limiter_drc_release_tlv),
 
 BIQUAD_COEFS("Ch1 - Biquad 1", 0),
 BIQUAD_COEFS("Ch1 - Biquad 2", 5),
@@ -613,10 +601,10 @@ static int mcs_ratio_table[3][6] = {
 static int sta350_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 				 int clk_id, unsigned int freq, int dir)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = codec_dai->component;
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 
-	dev_dbg(codec->dev, "mclk=%u\n", freq);
+	dev_dbg(component->dev, "mclk=%u\n", freq);
 	sta350->mclk = freq;
 
 	return 0;
@@ -633,12 +621,12 @@ static int sta350_set_dai_sysclk(struct snd_soc_dai *codec_dai,
 static int sta350_set_dai_fmt(struct snd_soc_dai *codec_dai,
 			      unsigned int fmt)
 {
-	struct snd_soc_codec *codec = codec_dai->codec;
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = codec_dai->component;
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	unsigned int confb = 0;
 
-	switch (fmt & SND_SOC_DAIFMT_MASTER_MASK) {
-	case SND_SOC_DAIFMT_CBS_CFS:
+	switch (fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_CBC_CFC:
 		break;
 	default:
 		return -EINVAL;
@@ -682,22 +670,22 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *params,
 			    struct snd_soc_dai *dai)
 {
-	struct snd_soc_codec *codec = dai->codec;
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_component *component = dai->component;
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	int i, mcs = -EINVAL, ir = -EINVAL;
 	unsigned int confa, confb;
 	unsigned int rate, ratio;
 	int ret;
 
 	if (!sta350->mclk) {
-		dev_err(codec->dev,
+		dev_err(component->dev,
 			"sta350->mclk is unset. Unable to determine ratio\n");
 		return -EIO;
 	}
 
 	rate = params_rate(params);
 	ratio = sta350->mclk / rate;
-	dev_dbg(codec->dev, "rate: %u, ratio: %u\n", rate, ratio);
+	dev_dbg(component->dev, "rate: %u, ratio: %u\n", rate, ratio);
 
 	for (i = 0; i < ARRAY_SIZE(interpolation_ratios); i++) {
 		if (interpolation_ratios[i].fs == rate) {
@@ -707,7 +695,7 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	if (ir < 0) {
-		dev_err(codec->dev, "Unsupported samplerate: %u\n", rate);
+		dev_err(component->dev, "Unsupported samplerate: %u\n", rate);
 		return -EINVAL;
 	}
 
@@ -719,7 +707,7 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	if (mcs < 0) {
-		dev_err(codec->dev, "Unresolvable ratio: %u\n", ratio);
+		dev_err(component->dev, "Unresolvable ratio: %u\n", ratio);
 		return -EINVAL;
 	}
 
@@ -729,10 +717,10 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 
 	switch (params_width(params)) {
 	case 24:
-		dev_dbg(codec->dev, "24bit\n");
-		/* fall through */
+		dev_dbg(component->dev, "24bit\n");
+		fallthrough;
 	case 32:
-		dev_dbg(codec->dev, "24bit or 32bit\n");
+		dev_dbg(component->dev, "24bit or 32bit\n");
 		switch (sta350->format) {
 		case SND_SOC_DAIFMT_I2S:
 			confb |= 0x0;
@@ -747,7 +735,7 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 
 		break;
 	case 20:
-		dev_dbg(codec->dev, "20bit\n");
+		dev_dbg(component->dev, "20bit\n");
 		switch (sta350->format) {
 		case SND_SOC_DAIFMT_I2S:
 			confb |= 0x4;
@@ -762,7 +750,7 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 
 		break;
 	case 18:
-		dev_dbg(codec->dev, "18bit\n");
+		dev_dbg(component->dev, "18bit\n");
 		switch (sta350->format) {
 		case SND_SOC_DAIFMT_I2S:
 			confb |= 0x8;
@@ -777,7 +765,7 @@ static int sta350_hw_params(struct snd_pcm_substream *substream,
 
 		break;
 	case 16:
-		dev_dbg(codec->dev, "16bit\n");
+		dev_dbg(component->dev, "16bit\n");
 		switch (sta350->format) {
 		case SND_SOC_DAIFMT_I2S:
 			confb |= 0x0;
@@ -827,20 +815,21 @@ static int sta350_startup_sequence(struct sta350_priv *sta350)
 
 /**
  * sta350_set_bias_level - DAPM callback
- * @codec: the codec device
+ * @component: the component device
  * @level: DAPM power level
  *
- * This is called by ALSA to put the codec into low power mode
- * or to wake it up.  If the codec is powered off completely
+ * This is called by ALSA to put the component into low power mode
+ * or to wake it up.  If the component is powered off completely
  * all registers must be restored after power on.
  */
-static int sta350_set_bias_level(struct snd_soc_codec *codec,
+static int sta350_set_bias_level(struct snd_soc_component *component,
 				 enum snd_soc_bias_level level)
 {
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
 	int ret;
 
-	dev_dbg(codec->dev, "level = %d\n", level);
+	dev_dbg(component->dev, "level = %d\n", level);
 	switch (level) {
 	case SND_SOC_BIAS_ON:
 		break;
@@ -853,18 +842,18 @@ static int sta350_set_bias_level(struct snd_soc_codec *codec,
 		break;
 
 	case SND_SOC_BIAS_STANDBY:
-		if (snd_soc_codec_get_bias_level(codec) == SND_SOC_BIAS_OFF) {
+		if (snd_soc_dapm_get_bias_level(dapm) == SND_SOC_BIAS_OFF) {
 			ret = regulator_bulk_enable(
 				ARRAY_SIZE(sta350->supplies),
 				sta350->supplies);
 			if (ret < 0) {
-				dev_err(codec->dev,
+				dev_err(component->dev,
 					"Failed to enable supplies: %d\n",
 					ret);
 				return ret;
 			}
 			sta350_startup_sequence(sta350);
-			sta350_cache_sync(codec);
+			sta350_cache_sync(component);
 		}
 
 		/* Power down */
@@ -893,10 +882,19 @@ static int sta350_set_bias_level(struct snd_soc_codec *codec,
 	return 0;
 }
 
+static const u64 sta350_selectable_formats =
+	SND_SOC_POSSIBLE_DAIFMT_I2S	|
+	SND_SOC_POSSIBLE_DAIFMT_RIGHT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_LEFT_J	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_NF	|
+	SND_SOC_POSSIBLE_DAIFMT_NB_IF;
+
 static const struct snd_soc_dai_ops sta350_dai_ops = {
 	.hw_params	= sta350_hw_params,
 	.set_sysclk	= sta350_set_dai_sysclk,
 	.set_fmt	= sta350_set_dai_fmt,
+	.auto_selectable_formats	= &sta350_selectable_formats,
+	.num_auto_selectable_formats	= 1,
 };
 
 static struct snd_soc_dai_driver sta350_dai = {
@@ -911,22 +909,23 @@ static struct snd_soc_dai_driver sta350_dai = {
 	.ops = &sta350_dai_ops,
 };
 
-static int sta350_probe(struct snd_soc_codec *codec)
+static int sta350_probe(struct snd_soc_component *component)
 {
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(component);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 	struct sta350_platform_data *pdata = sta350->pdata;
 	int i, ret = 0, thermal = 0;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(sta350->supplies),
 				    sta350->supplies);
 	if (ret < 0) {
-		dev_err(codec->dev, "Failed to enable supplies: %d\n", ret);
+		dev_err(component->dev, "Failed to enable supplies: %d\n", ret);
 		return ret;
 	}
 
 	ret = sta350_startup_sequence(sta350);
 	if (ret < 0) {
-		dev_err(codec->dev, "Failed to startup device\n");
+		dev_err(component->dev, "Failed to startup device\n");
 		return ret;
 	}
 
@@ -1036,35 +1035,34 @@ static int sta350_probe(struct snd_soc_codec *codec)
 	sta350->coef_shadow[60] = 0x400000;
 	sta350->coef_shadow[61] = 0x400000;
 
-	snd_soc_codec_force_bias_level(codec, SND_SOC_BIAS_STANDBY);
+	snd_soc_dapm_force_bias_level(dapm, SND_SOC_BIAS_STANDBY);
 	/* Bias level configuration will have done an extra enable */
 	regulator_bulk_disable(ARRAY_SIZE(sta350->supplies), sta350->supplies);
 
 	return 0;
 }
 
-static int sta350_remove(struct snd_soc_codec *codec)
+static void sta350_remove(struct snd_soc_component *component)
 {
-	struct sta350_priv *sta350 = snd_soc_codec_get_drvdata(codec);
+	struct sta350_priv *sta350 = snd_soc_component_get_drvdata(component);
 
 	regulator_bulk_disable(ARRAY_SIZE(sta350->supplies), sta350->supplies);
-
-	return 0;
 }
 
-static const struct snd_soc_codec_driver sta350_codec = {
-	.probe =		sta350_probe,
-	.remove =		sta350_remove,
-	.set_bias_level =	sta350_set_bias_level,
-	.suspend_bias_off =	true,
-	.component_driver = {
-		.controls =		sta350_snd_controls,
-		.num_controls =		ARRAY_SIZE(sta350_snd_controls),
-		.dapm_widgets =		sta350_dapm_widgets,
-		.num_dapm_widgets =	ARRAY_SIZE(sta350_dapm_widgets),
-		.dapm_routes =		sta350_dapm_routes,
-		.num_dapm_routes =	ARRAY_SIZE(sta350_dapm_routes),
-	},
+static const struct snd_soc_component_driver sta350_component = {
+	.probe			= sta350_probe,
+	.remove			= sta350_remove,
+	.set_bias_level		= sta350_set_bias_level,
+	.controls		= sta350_snd_controls,
+	.num_controls		= ARRAY_SIZE(sta350_snd_controls),
+	.dapm_widgets		= sta350_dapm_widgets,
+	.num_dapm_widgets	= ARRAY_SIZE(sta350_dapm_widgets),
+	.dapm_routes		= sta350_dapm_routes,
+	.num_dapm_routes	= ARRAY_SIZE(sta350_dapm_routes),
+	.suspend_bias_off	= 1,
+	.idle_bias_on		= 1,
+	.use_pmdown_time	= 1,
+	.endianness		= 1,
 };
 
 static const struct regmap_config sta350_regmap = {
@@ -1073,7 +1071,7 @@ static const struct regmap_config sta350_regmap = {
 	.max_register =		STA350_MISC2,
 	.reg_defaults =		sta350_regs,
 	.num_reg_defaults =	ARRAY_SIZE(sta350_regs),
-	.cache_type =		REGCACHE_RBTREE,
+	.cache_type =		REGCACHE_MAPLE,
 	.wr_table =		&sta350_write_regs,
 	.rd_table =		&sta350_read_regs,
 	.volatile_table =	&sta350_volatile_regs,
@@ -1098,7 +1096,7 @@ static int sta350_probe_dt(struct device *dev, struct sta350_priv *sta350)
 	struct device_node *np = dev->of_node;
 	struct sta350_platform_data *pdata;
 	const char *ffx_power_mode;
-	u16 tmp;
+	u32 tmp;
 	u8 tmp8;
 
 	pdata = devm_kzalloc(dev, sizeof(*pdata), GFP_KERNEL);
@@ -1114,12 +1112,12 @@ static int sta350_probe_dt(struct device *dev, struct sta350_priv *sta350)
 	of_property_read_u8(np, "st,ch3-output-mapping",
 			    &pdata->ch3_output_mapping);
 
-	if (of_get_property(np, "st,thermal-warning-recovery", NULL))
-		pdata->thermal_warning_recovery = 1;
-	if (of_get_property(np, "st,thermal-warning-adjustment", NULL))
-		pdata->thermal_warning_adjustment = 1;
-	if (of_get_property(np, "st,fault-detect-recovery", NULL))
-		pdata->fault_detect_recovery = 1;
+	pdata->thermal_warning_recovery =
+		of_property_read_bool(np, "st,thermal-warning-recovery");
+	pdata->thermal_warning_adjustment =
+		of_property_read_bool(np, "st,thermal-warning-adjustment");
+	pdata->fault_detect_recovery =
+		of_property_read_bool(np, "st,fault-detect-recovery");
 
 	pdata->ffx_power_output_mode = STA350_FFX_PM_VARIABLE_DROP_COMP;
 	if (!of_property_read_string(np, "st,ffx-power-output-mode",
@@ -1138,44 +1136,37 @@ static int sta350_probe_dt(struct device *dev, struct sta350_priv *sta350)
 	}
 
 	tmp = 140;
-	of_property_read_u16(np, "st,drop-compensation-ns", &tmp);
-	pdata->drop_compensation_ns = clamp_t(u16, tmp, 0, 300) / 20;
+	of_property_read_u32(np, "st,drop-compensation-ns", &tmp);
+	pdata->drop_compensation_ns = clamp_t(u32, tmp, 0, 300) / 20;
 
-	if (of_get_property(np, "st,overcurrent-warning-adjustment", NULL))
-		pdata->oc_warning_adjustment = 1;
+	pdata->oc_warning_adjustment =
+		of_property_read_bool(np, "st,overcurrent-warning-adjustment");
 
 	/* CONFE */
-	if (of_get_property(np, "st,max-power-use-mpcc", NULL))
-		pdata->max_power_use_mpcc = 1;
-
-	if (of_get_property(np, "st,max-power-correction", NULL))
-		pdata->max_power_correction = 1;
-
-	if (of_get_property(np, "st,am-reduction-mode", NULL))
-		pdata->am_reduction_mode = 1;
-
-	if (of_get_property(np, "st,odd-pwm-speed-mode", NULL))
-		pdata->odd_pwm_speed_mode = 1;
-
-	if (of_get_property(np, "st,distortion-compensation", NULL))
-		pdata->distortion_compensation = 1;
+	pdata->max_power_use_mpcc =
+		of_property_read_bool(np, "st,max-power-use-mpcc");
+	pdata->max_power_correction =
+		of_property_read_bool(np, "st,max-power-correction");
+	pdata->am_reduction_mode =
+		of_property_read_bool(np, "st,am-reduction-mode");
+	pdata->odd_pwm_speed_mode =
+		of_property_read_bool(np, "st,odd-pwm-speed-mode");
+	pdata->distortion_compensation =
+		of_property_read_bool(np, "st,distortion-compensation");
 
 	/* CONFF */
-	if (of_get_property(np, "st,invalid-input-detect-mute", NULL))
-		pdata->invalid_input_detect_mute = 1;
+	pdata->invalid_input_detect_mute =
+		of_property_read_bool(np, "st,invalid-input-detect-mute");
 
 	/* MISC */
-	if (of_get_property(np, "st,activate-mute-output", NULL))
-		pdata->activate_mute_output = 1;
-
-	if (of_get_property(np, "st,bridge-immediate-off", NULL))
-		pdata->bridge_immediate_off = 1;
-
-	if (of_get_property(np, "st,noise-shape-dc-cut", NULL))
-		pdata->noise_shape_dc_cut = 1;
-
-	if (of_get_property(np, "st,powerdown-master-volume", NULL))
-		pdata->powerdown_master_vol = 1;
+	pdata->activate_mute_output =
+		of_property_read_bool(np, "st,activate-mute-output");
+	pdata->bridge_immediate_off =
+		of_property_read_bool(np, "st,bridge-immediate-off");
+	pdata->noise_shape_dc_cut =
+		of_property_read_bool(np, "st,noise-shape-dc-cut");
+	pdata->powerdown_master_vol =
+		of_property_read_bool(np, "st,powerdown-master-volume");
 
 	if (!of_property_read_u8(np, "st,powerdown-delay-divider", &tmp8)) {
 		if (is_power_of_2(tmp8) && tmp8 >= 1 && tmp8 <= 128)
@@ -1191,8 +1182,7 @@ static int sta350_probe_dt(struct device *dev, struct sta350_priv *sta350)
 }
 #endif
 
-static int sta350_i2c_probe(struct i2c_client *i2c,
-			    const struct i2c_device_id *id)
+static int sta350_i2c_probe(struct i2c_client *i2c)
 {
 	struct device *dev = &i2c->dev;
 	struct sta350_priv *sta350;
@@ -1244,21 +1234,15 @@ static int sta350_i2c_probe(struct i2c_client *i2c,
 
 	i2c_set_clientdata(i2c, sta350);
 
-	ret = snd_soc_register_codec(dev, &sta350_codec, &sta350_dai, 1);
+	ret = devm_snd_soc_register_component(dev, &sta350_component, &sta350_dai, 1);
 	if (ret < 0)
-		dev_err(dev, "Failed to register codec (%d)\n", ret);
+		dev_err(dev, "Failed to register component (%d)\n", ret);
 
 	return ret;
 }
 
-static int sta350_i2c_remove(struct i2c_client *client)
-{
-	snd_soc_unregister_codec(&client->dev);
-	return 0;
-}
-
 static const struct i2c_device_id sta350_i2c_id[] = {
-	{ "sta350", 0 },
+	{ .name = "sta350" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, sta350_i2c_id);
@@ -1268,8 +1252,7 @@ static struct i2c_driver sta350_i2c_driver = {
 		.name = "sta350",
 		.of_match_table = of_match_ptr(st350_dt_ids),
 	},
-	.probe =    sta350_i2c_probe,
-	.remove =   sta350_i2c_remove,
+	.probe = sta350_i2c_probe,
 	.id_table = sta350_i2c_id,
 };
 

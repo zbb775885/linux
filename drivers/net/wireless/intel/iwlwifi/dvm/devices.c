@@ -1,35 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /******************************************************************************
  *
  * Copyright(c) 2008 - 2014 Intel Corporation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
- *
- * The full GNU General Public License is included in this distribution in the
- * file called LICENSE.
- *
- * Contact Information:
- *  Intel Linux Wireless <linuxwifi@intel.com>
- * Intel Corporation, 5200 N.E. Elam Young Parkway, Hillsboro, OR 97124-6497
- *
+ * Copyright (C) 2019, 2025-2026 Intel Corporation
  *****************************************************************************/
+
+#include <linux/units.h>
 
 /*
  * DVM device-specific data & functions
  */
-#include "iwl-io.h"
+#include "iwl-trans.h"
 #include "iwl-prph.h"
-#include "iwl-eeprom-parse.h"
+#include "iwl-nvm-utils.h"
 
 #include "agn.h"
 #include "dev.h"
@@ -62,16 +45,17 @@ static void iwl1000_set_ct_threshold(struct iwl_priv *priv)
 static void iwl1000_nic_config(struct iwl_priv *priv)
 {
 	/* Setting digital SVR for 1000 card to 1.32V */
-	/* locking is acquired in iwl_set_bits_mask_prph() function */
-	iwl_set_bits_mask_prph(priv->trans, APMG_DIGITAL_SVR_REG,
-				APMG_SVR_DIGITAL_VOLTAGE_1_32,
-				~APMG_SVR_VOLTAGE_CONFIG_BIT_MSK);
+	/* locking is acquired in iwl_trans_set_bits_mask_prph() function */
+	iwl_trans_set_bits_mask_prph(priv->trans, APMG_DIGITAL_SVR_REG,
+				     APMG_SVR_DIGITAL_VOLTAGE_1_32,
+				     ~APMG_SVR_VOLTAGE_CONFIG_BIT_MSK);
 }
 
 /**
  * iwl_beacon_time_mask_low - mask of lower 32 bit of beacon time
- * @priv -- pointer to iwl_priv data structure
- * @tsf_bits -- number of bits need to shift for masking)
+ * @priv: pointer to iwl_priv data structure
+ * @tsf_bits: number of bits need to shift for masking)
+ * Return: low 32 bits of beacon time mask
  */
 static inline u32 iwl_beacon_time_mask_low(struct iwl_priv *priv,
 					   u16 tsf_bits)
@@ -81,8 +65,9 @@ static inline u32 iwl_beacon_time_mask_low(struct iwl_priv *priv,
 
 /**
  * iwl_beacon_time_mask_high - mask of higher 32 bit of beacon time
- * @priv -- pointer to iwl_priv data structure
- * @tsf_bits -- number of bits need to shift for masking)
+ * @priv: pointer to iwl_priv data structure
+ * @tsf_bits: number of bits need to shift for masking)
+ * Return: high 32 bits of beacon time mask
  */
 static inline u32 iwl_beacon_time_mask_high(struct iwl_priv *priv,
 					    u16 tsf_bits)
@@ -199,8 +184,8 @@ static void iwl2000_set_ct_threshold(struct iwl_priv *priv)
 /* NIC configuration for 2000 series */
 static void iwl2000_nic_config(struct iwl_priv *priv)
 {
-	iwl_set_bit(priv->trans, CSR_GP_DRIVER_REG,
-		    CSR_GP_DRIVER_REG_BIT_RADIO_IQ_INVER);
+	iwl_trans_set_bit(priv->trans, CSR_GP_DRIVER_REG,
+			  CSR_GP_DRIVER_REG_BIT_RADIO_IQ_INVER);
 }
 
 static const struct iwl_sensitivity_ranges iwl2000_sensitivity = {
@@ -359,7 +344,7 @@ static s32 iwl_temp_calib_to_offset(struct iwl_priv *priv)
 static void iwl5150_set_ct_threshold(struct iwl_priv *priv)
 {
 	const s32 volt2temp_coef = IWL_5150_VOLTAGE_TO_TEMPERATURE_COEFF;
-	s32 threshold = (s32)CELSIUS_TO_KELVIN(CT_KILL_THRESHOLD_LEGACY) -
+	s32 threshold = (s32)celsius_to_kelvin(CT_KILL_THRESHOLD_LEGACY) -
 			iwl_temp_calib_to_offset(priv);
 
 	priv->hw_params.ct_kill_threshold = threshold * volt2temp_coef;
@@ -395,7 +380,7 @@ static void iwl5150_temperature(struct iwl_priv *priv)
 	vt = le32_to_cpu(priv->statistics.common.temperature);
 	vt = vt / IWL_5150_VOLTAGE_TO_TEMPERATURE_COEFF + offset;
 	/* now vt hold the temperature in Kelvin */
-	priv->temperature = KELVIN_TO_CELSIUS(vt);
+	priv->temperature = kelvin_to_celsius(vt);
 	iwl_tt_handler(priv);
 }
 
@@ -498,29 +483,29 @@ static void iwl6000_set_ct_threshold(struct iwl_priv *priv)
 /* NIC configuration for 6000 series */
 static void iwl6000_nic_config(struct iwl_priv *priv)
 {
-	switch (priv->cfg->device_family) {
+	switch (priv->trans->mac_cfg->device_family) {
 	case IWL_DEVICE_FAMILY_6005:
 	case IWL_DEVICE_FAMILY_6030:
 	case IWL_DEVICE_FAMILY_6000:
 		break;
 	case IWL_DEVICE_FAMILY_6000i:
 		/* 2x2 IPA phy type */
-		iwl_write32(priv->trans, CSR_GP_DRIVER_REG,
-			     CSR_GP_DRIVER_REG_BIT_RADIO_SKU_2x2_IPA);
+		iwl_trans_write32(priv->trans, CSR_GP_DRIVER_REG,
+				  CSR_GP_DRIVER_REG_BIT_RADIO_SKU_2x2_IPA);
 		break;
 	case IWL_DEVICE_FAMILY_6050:
 		/* Indicate calibration version to uCode. */
 		if (priv->nvm_data->calib_version >= 6)
-			iwl_set_bit(priv->trans, CSR_GP_DRIVER_REG,
-					CSR_GP_DRIVER_REG_BIT_CALIB_VERSION6);
+			iwl_trans_set_bit(priv->trans, CSR_GP_DRIVER_REG,
+					  CSR_GP_DRIVER_REG_BIT_CALIB_VERSION6);
 		break;
 	case IWL_DEVICE_FAMILY_6150:
 		/* Indicate calibration version to uCode. */
 		if (priv->nvm_data->calib_version >= 6)
-			iwl_set_bit(priv->trans, CSR_GP_DRIVER_REG,
-					CSR_GP_DRIVER_REG_BIT_CALIB_VERSION6);
-		iwl_set_bit(priv->trans, CSR_GP_DRIVER_REG,
-			    CSR_GP_DRIVER_REG_BIT_6050_1x2);
+			iwl_trans_set_bit(priv->trans, CSR_GP_DRIVER_REG,
+					  CSR_GP_DRIVER_REG_BIT_CALIB_VERSION6);
+		iwl_trans_set_bit(priv->trans, CSR_GP_DRIVER_REG,
+				  CSR_GP_DRIVER_REG_BIT_6050_1x2);
 		break;
 	default:
 		WARN_ON(1);
@@ -582,7 +567,7 @@ static int iwl6000_hw_channel_switch(struct iwl_priv *priv,
 	};
 	int err;
 
-	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	cmd = kzalloc_obj(*cmd);
 	if (!cmd)
 		return -ENOMEM;
 

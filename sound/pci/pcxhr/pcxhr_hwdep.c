@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for Digigram pcxhr compatible soundcards
  *
  * hwdep device manager
  *
  * Copyright (c) 2004 by Digigram <alsa@digigram.com>
- *
- *   This program is free software; you can redistribute it and/or modify
- *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or
- *   (at your option) any later version.
- *
- *   This program is distributed in the hope that it will be useful,
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *   GNU General Public License for more details.
- *
- *   You should have received a copy of the GNU General Public License
- *   along with this program; if not, write to the Free Software
- *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307 USA
  */
 
 #include <linux/interrupt.h>
@@ -335,14 +322,17 @@ static int pcxhr_dsp_load(struct pcxhr_mgr *mgr, int index,
         for (card_index = 0; card_index < mgr->num_cards; card_index++) {
 		struct snd_pcxhr *chip = mgr->chip[card_index];
 
-		if ((err = pcxhr_create_pcm(chip)) < 0)
+		err = pcxhr_create_pcm(chip);
+		if (err < 0)
 			return err;
 
 		if (card_index == 0) {
-			if ((err = pcxhr_create_mixer(chip->mgr)) < 0)
+			err = pcxhr_create_mixer(chip->mgr);
+			if (err < 0)
 				return err;
 		}
-		if ((err = snd_card_register(chip->card)) < 0)
+		err = snd_card_register(chip->card);
+		if (err < 0)
 			return err;
 	}
 	err = pcxhr_start_pipes(mgr);
@@ -361,7 +351,7 @@ static int pcxhr_dsp_load(struct pcxhr_mgr *mgr, int index,
  */
 int pcxhr_setup_firmware(struct pcxhr_mgr *mgr)
 {
-	static char *fw_files[][5] = {
+	static const char * const fw_files[][5] = {
 	[0] = { "xlxint.dat", "xlxc882hr.dat",
 		"dspe882.e56", "dspb882hr.b56", "dspd882.d56" },
 	[1] = { "xlxint.dat", "xlxc882e.dat",
@@ -377,7 +367,6 @@ int pcxhr_setup_firmware(struct pcxhr_mgr *mgr)
 	};
 	char path[32];
 
-	const struct firmware *fw_entry;
 	int i, err;
 	int fw_set = mgr->fw_file_set;
 
@@ -385,6 +374,7 @@ int pcxhr_setup_firmware(struct pcxhr_mgr *mgr)
 		if (!fw_files[fw_set][i])
 			continue;
 		sprintf(path, "pcxhr/%s", fw_files[fw_set][i]);
+		const struct firmware *fw_entry __free(firmware) = NULL;
 		if (request_firmware(&fw_entry, path, &mgr->pci->dev)) {
 			dev_err(&mgr->pci->dev,
 				"pcxhr: can't load firmware %s\n",
@@ -393,7 +383,6 @@ int pcxhr_setup_firmware(struct pcxhr_mgr *mgr)
 		}
 		/* fake hwdep dsp record */
 		err = pcxhr_dsp_load(mgr, i, fw_entry);
-		release_firmware(fw_entry);
 		if (err < 0)
 			return err;
 		mgr->dsp_loaded |= 1 << i;

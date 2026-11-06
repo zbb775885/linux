@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * genelf_debug.c
  * Copyright (C) 2015, Google, Inc
@@ -5,13 +6,14 @@
  * Contributed by:
  * 	Stephane Eranian <eranian@google.com>
  *
- * Released under the GPL v2.
- *
  * based on GPLv2 source code from Oprofile
  * @remark Copyright 2007 OProfile authors
  * @author Philippe Elie
  */
 #include <linux/compiler.h>
+#include <linux/zalloc.h>
+#include <linux/kernel.h>
+#include <linux/unaligned.h>
 #include <sys/types.h>
 #include <stdio.h>
 #include <getopt.h>
@@ -25,7 +27,6 @@
 #include <err.h>
 #include <dwarf.h>
 
-#include "perf.h"
 #include "genelf.h"
 #include "../util/jitdump.h"
 
@@ -87,6 +88,12 @@ buffer_ext_init(struct buffer_ext *be)
 	be->data = NULL;
 	be->cur_pos = 0;
 	be->max_sz = 0;
+}
+
+static void
+buffer_ext_exit(struct buffer_ext *be)
+{
+	zfree(&be->data);
 }
 
 static inline size_t
@@ -298,11 +305,13 @@ static ubyte get_special_opcode(struct debug_entry *ent,
 {
 	unsigned int temp;
 	unsigned long delta_addr;
+	int lineno = get_unaligned(&ent->lineno);
+	uint64_t addr = get_unaligned(&ent->addr);
 
 	/*
 	 * delta from line_base
 	 */
-	temp = (ent->lineno - last_line) - default_debug_line_header.line_base;
+	temp = (lineno - last_line) - default_debug_line_header.line_base;
 
 	if (temp >= default_debug_line_header.line_range)
 		return 0;
@@ -310,7 +319,7 @@ static ubyte get_special_opcode(struct debug_entry *ent,
 	/*
 	 * delta of addresses
 	 */
-	delta_addr = (ent->addr - last_vma) / default_debug_line_header.minimum_instruction_length;
+	delta_addr = (addr - last_vma) / default_debug_line_header.minimum_instruction_length;
 
 	/* This is not sufficient to ensure opcode will be in [0-256] but
 	 * sufficient to ensure when summing with the delta lineno we will
@@ -332,6 +341,9 @@ static void emit_lineno_info(struct buffer_ext *be,
 {
 	size_t i;
 
+	/* as described in the jitdump format */
+	const char repeated_name_marker[] = {'\xff', '\0'};
+
 	/*
 	 * Machine state at start of a statement program
 	 * address = 0
@@ -344,7 +356,7 @@ static void emit_lineno_info(struct buffer_ext *be,
 	 */
 
 	/* start state of the state machine we take care of */
-	unsigned long last_vma = code_addr;
+	unsigned long last_vma = 0;
 	char const  *cur_filename = NULL;
 	unsigned long cur_file_idx = 0;
 	int last_line = 1;
@@ -354,11 +366,14 @@ static void emit_lineno_info(struct buffer_ext *be,
 	for (i = 0; i < nr_entry; i++, ent = debug_entry_next(ent)) {
 		int need_copy = 0;
 		ubyte special_opcode;
+		int lineno = get_unaligned(&ent->lineno);
+		uint64_t addr = get_unaligned(&ent->addr);
 
 		/*
 		 * check if filename changed, if so add it
 		 */
-		if (!cur_filename || strcmp(cur_filename, ent->name)) {
+		if ((!cur_filename || strcmp(cur_filename, ent->name)) &&
+			strcmp(repeated_name_marker, ent->name)) {
 			emit_lne_define_filename(be, ent->name);
 			cur_filename = ent->name;
 			emit_set_file(be, ++cur_file_idx);
@@ -367,24 +382,24 @@ static void emit_lineno_info(struct buffer_ext *be,
 
 		special_opcode = get_special_opcode(ent, last_line, last_vma);
 		if (special_opcode != 0) {
-			last_line = ent->lineno;
-			last_vma  = ent->addr;
+			last_line = lineno;
+			last_vma  = addr;
 			emit_opcode(be, special_opcode);
 		} else {
 			/*
 			 * lines differ, emit line delta
 			 */
-			if (last_line != ent->lineno) {
-				emit_advance_lineno(be, ent->lineno - last_line);
-				last_line = ent->lineno;
+			if (last_line != lineno) {
+				emit_advance_lineno(be, lineno - last_line);
+				last_line = lineno;
 				need_copy = 1;
 			}
 			/*
 			 * addresses differ, emit address delta
 			 */
-			if (last_vma != ent->addr) {
-				emit_advance_pc(be, ent->addr - last_vma);
-				last_vma = ent->addr;
+			if (last_vma != addr) {
+				emit_advance_pc(be, addr - last_vma);
+				last_vma = addr;
 				need_copy = 1;
 			}
 			/*
@@ -471,11 +486,11 @@ jit_process_debug_info(uint64_t code_addr,
 	int i;
 
 	for (i = 0; i < nr_debug_entries; i++) {
-		ent->addr = ent->addr - code_addr;
+		put_unaligned(get_unaligned(&ent->addr) - code_addr, &ent->addr);
 		ent = debug_entry_next(ent);
 	}
 	add_compilation_unit(di, buffer_ext_size(dl));
-	add_debug_line(dl, debug, nr_debug_entries, 0);
+	add_debug_line(dl, debug, nr_debug_entries, GEN_ELF_TEXT_OFFSET);
 	add_debug_abbrev(da);
 	if (0) buffer_ext_dump(da, "abbrev");
 
@@ -489,28 +504,28 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	Elf_Scn *scn;
 	Elf_Shdr *shdr;
 	struct buffer_ext dl, di, da;
-	int ret;
+	int ret = -1;
 
 	buffer_ext_init(&dl);
 	buffer_ext_init(&di);
 	buffer_ext_init(&da);
 
-	ret = jit_process_debug_info(code_addr, debug, nr_debug_entries, &dl, &da, &di);
-	if (ret)
-		return -1;
+	if (jit_process_debug_info(code_addr, debug, nr_debug_entries, &dl, &da, &di))
+		goto out;
+
 	/*
 	 * setup .debug_line section
 	 */
 	scn = elf_newscn(e);
 	if (!scn) {
 		warnx("cannot create section");
-		return -1;
+		goto out;
 	}
 
 	d = elf_newdata(scn);
 	if (!d) {
 		warnx("cannot get new data");
-		return -1;
+		goto out;
 	}
 
 	d->d_align = 1;
@@ -523,7 +538,7 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	shdr = elf_getshdr(scn);
 	if (!shdr) {
 		warnx("cannot get section header");
-		return -1;
+		goto out;
 	}
 
 	shdr->sh_name = 52; /* .debug_line */
@@ -538,13 +553,13 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	scn = elf_newscn(e);
 	if (!scn) {
 		warnx("cannot create section");
-		return -1;
+		goto out;
 	}
 
 	d = elf_newdata(scn);
 	if (!d) {
 		warnx("cannot get new data");
-		return -1;
+		goto out;
 	}
 
 	d->d_align = 1;
@@ -557,7 +572,7 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	shdr = elf_getshdr(scn);
 	if (!shdr) {
 		warnx("cannot get section header");
-		return -1;
+		goto out;
 	}
 
 	shdr->sh_name = 64; /* .debug_info */
@@ -572,13 +587,13 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	scn = elf_newscn(e);
 	if (!scn) {
 		warnx("cannot create section");
-		return -1;
+		goto out;
 	}
 
 	d = elf_newdata(scn);
 	if (!d) {
 		warnx("cannot get new data");
-		return -1;
+		goto out;
 	}
 
 	d->d_align = 1;
@@ -591,7 +606,7 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	shdr = elf_getshdr(scn);
 	if (!shdr) {
 		warnx("cannot get section header");
-		return -1;
+		goto out;
 	}
 
 	shdr->sh_name = 76; /* .debug_info */
@@ -603,9 +618,14 @@ jit_add_debug_info(Elf *e, uint64_t code_addr, void *debug, int nr_debug_entries
 	/*
 	 * now we update the ELF image with all the sections
 	 */
-	if (elf_update(e, ELF_C_WRITE) < 0) {
+	if (elf_update(e, ELF_C_WRITE) < 0)
 		warnx("elf_update debug failed");
-		return -1;
-	}
-	return 0;
+	else
+		ret = 0;
+
+out:
+	buffer_ext_exit(&dl);
+	buffer_ext_exit(&di);
+	buffer_ext_exit(&da);
+	return ret;
 }

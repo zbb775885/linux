@@ -10,10 +10,9 @@
  * original idea from Natarajan Krishnaswami <nkrishna@us.ibm.com>
  */
 
-#define KMSG_COMPONENT "cio"
-#define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
+#define pr_fmt(fmt) "cio: " fmt
 
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -46,7 +45,7 @@
 /* indices for READCMB */
 enum cmb_index {
 	avg_utilization = -1,
- /* basic and exended format: */
+ /* basic and extended format: */
 	cmb_ssch_rsch_count = 0,
 	cmb_sample_count,
 	cmb_device_connect_time,
@@ -135,7 +134,7 @@ static inline u64 time_to_nsec(u32 value)
  * Users are usually interested in average times,
  * not accumulated time.
  * This also helps us with atomicity problems
- * when reading sinlge values.
+ * when reading single values.
  */
 static inline u64 time_to_avg_nsec(u32 value, u32 count)
 {
@@ -163,13 +162,15 @@ static inline u64 time_to_avg_nsec(u32 value, u32 count)
  */
 static inline void cmf_activate(void *area, unsigned int onoff)
 {
-	register void * __gpr2 asm("2");
-	register long __gpr1 asm("1");
-
-	__gpr2 = area;
-	__gpr1 = onoff;
 	/* activate channel measurement */
-	asm("schm" : : "d" (__gpr2), "d" (__gpr1) );
+	asm volatile(
+		"	lgr	1,%[r1]\n"
+		"	lgr	2,%[mbo]\n"
+		"	schm"
+		:
+		: [r1] "d" ((unsigned long)onoff),
+		  [mbo] "d" (virt_to_phys(area))
+		: "1", "2");
 }
 
 static int set_schib(struct ccw_device *cdev, u32 mme, int mbfc,
@@ -182,7 +183,7 @@ static int set_schib(struct ccw_device *cdev, u32 mme, int mbfc,
 	sch->config.mbfc = mbfc;
 	/* address can be either a block address or a block index */
 	if (mbfc)
-		sch->config.mba = address;
+		sch->config.mba = address ? virt_to_dma64((void *)address) : 0;
 	else
 		sch->config.mbi = address;
 
@@ -481,12 +482,15 @@ static int alloc_cmb(struct ccw_device *cdev)
 	ssize_t size;
 	struct cmb_data *cmb_data;
 
+	if (cmb_area.num_channels <= 0)
+		return -ENOMEM;
+
 	/* Allocate private cmb_data. */
-	cmb_data = kzalloc(sizeof(struct cmb_data), GFP_KERNEL);
+	cmb_data = kzalloc_obj(struct cmb_data);
 	if (!cmb_data)
 		return -ENOMEM;
 
-	cmb_data->last_block = kzalloc(sizeof(struct cmb), GFP_KERNEL);
+	cmb_data->last_block = kzalloc_obj(struct cmb);
 	if (!cmb_data->last_block) {
 		kfree(cmb_data);
 		return -ENOMEM;
@@ -500,13 +504,12 @@ static int alloc_cmb(struct ccw_device *cdev)
 		WARN_ON(!list_empty(&cmb_area.list));
 
 		spin_unlock(&cmb_area.lock);
-		mem = (void*)__get_free_pages(GFP_KERNEL | GFP_DMA,
-				 get_order(size));
+		mem = kmalloc(size, GFP_KERNEL);
 		spin_lock(&cmb_area.lock);
 
 		if (cmb_area.mem) {
 			/* ok, another thread was faster */
-			free_pages((unsigned long)mem, get_order(size));
+			kfree(mem);
 		} else if (!mem) {
 			/* no luck */
 			ret = -ENOMEM;
@@ -547,10 +550,8 @@ static void free_cmb(struct ccw_device *cdev)
 	list_del_init(&priv->cmb_list);
 
 	if (list_empty(&cmb_area.list)) {
-		ssize_t size;
-		size = sizeof(struct cmb) * cmb_area.num_channels;
 		cmf_activate(NULL, CMF_OFF);
-		free_pages((unsigned long)cmb_area.mem, get_order(size));
+		kfree(cmb_area.mem);
 		cmb_area.mem = NULL;
 	}
 	spin_unlock_irq(cdev->ccwlock);
@@ -766,11 +767,11 @@ static int alloc_cmbe(struct ccw_device *cdev)
 	if (!cmbe)
 		return ret;
 
-	cmb_data = kzalloc(sizeof(*cmb_data), GFP_KERNEL);
+	cmb_data = kzalloc_obj(*cmb_data);
 	if (!cmb_data)
 		goto out_free;
 
-	cmb_data->last_block = kzalloc(sizeof(struct cmbe), GFP_KERNEL);
+	cmb_data->last_block = kzalloc_obj(struct cmbe);
 	if (!cmb_data->last_block)
 		goto out_free;
 
@@ -976,8 +977,7 @@ static struct cmb_operations cmbops_extended = {
 
 static ssize_t cmb_show_attr(struct device *dev, char *buf, enum cmb_index idx)
 {
-	return sprintf(buf, "%lld\n",
-		(unsigned long long) cmf_read(to_ccwdev(dev), idx));
+	return sysfs_emit(buf, "%lld\n", cmf_read(to_ccwdev(dev), idx));
 }
 
 static ssize_t cmb_show_avg_sample_interval(struct device *dev,
@@ -997,7 +997,7 @@ static ssize_t cmb_show_avg_sample_interval(struct device *dev,
 	} else
 		interval = -1;
 	spin_unlock_irq(cdev->ccwlock);
-	return sprintf(buf, "%ld\n", interval);
+	return sysfs_emit(buf, "%ld\n", interval);
 }
 
 static ssize_t cmb_show_avg_utilization(struct device *dev,
@@ -1006,7 +1006,7 @@ static ssize_t cmb_show_avg_utilization(struct device *dev,
 {
 	unsigned long u = cmf_read(to_ccwdev(dev), avg_utilization);
 
-	return sprintf(buf, "%02lu.%01lu%%\n", u / 10, u % 10);
+	return sysfs_emit(buf, "%02lu.%01lu%%\n", u / 10, u % 10);
 }
 
 #define cmf_attr(name) \
@@ -1079,7 +1079,7 @@ static ssize_t cmb_enable_show(struct device *dev,
 {
 	struct ccw_device *cdev = to_ccwdev(dev);
 
-	return sprintf(buf, "%d\n", cmf_enabled(cdev));
+	return sysfs_emit(buf, "%d\n", cmf_enabled(cdev));
 }
 
 static ssize_t cmb_enable_store(struct device *dev,
@@ -1108,11 +1108,6 @@ static ssize_t cmb_enable_store(struct device *dev,
 	return ret ? ret : c;
 }
 DEVICE_ATTR_RW(cmb_enable);
-
-int ccw_set_cmf(struct ccw_device *cdev, int enable)
-{
-	return cmbops->set(cdev, enable ? 2 : 0);
-}
 
 /**
  * enable_cmf() - switch on the channel measurement for a specific device
@@ -1231,7 +1226,7 @@ int cmf_readall(struct ccw_device *cdev, struct cmbdata *data)
 	return cmbops->readall(cdev, data);
 }
 
-/* Reenable cmf when a disconnected device becomes available again. */
+/* Re-enable cmf when a disconnected device becomes available again. */
 int cmf_reenable(struct ccw_device *cdev)
 {
 	cmbops->reset(cdev);

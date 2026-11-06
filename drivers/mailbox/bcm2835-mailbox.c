@@ -1,14 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Copyright (C) 2010,2015 Broadcom
  *  Copyright (C) 2013-2014 Lubomir Rintel
  *  Copyright (C) 2013 Craig McGeachie
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
- * This device provides a mechanism for writing to the mailboxes,
- * that are shared between the ARM and the VideoCore processor
  *
  * Parts of the driver are based on:
  *  - arch/arm/mach-bcm2708/vcio.c file written by Gray Girling that was
@@ -134,7 +128,7 @@ static struct mbox_chan *bcm2835_mbox_index_xlate(struct mbox_controller *mbox,
 		    const struct of_phandle_args *sp)
 {
 	if (sp->args_count != 0)
-		return NULL;
+		return ERR_PTR(-EINVAL);
 
 	return &mbox->chans[0];
 }
@@ -142,30 +136,30 @@ static struct mbox_chan *bcm2835_mbox_index_xlate(struct mbox_controller *mbox,
 static int bcm2835_mbox_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	void __iomem *regs;
 	int ret = 0;
-	struct resource *iomem;
+	int irq;
 	struct bcm2835_mbox *mbox;
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0)
+		return irq;
+
+	regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(regs))
+		return PTR_ERR(regs);
 
 	mbox = devm_kzalloc(dev, sizeof(*mbox), GFP_KERNEL);
 	if (mbox == NULL)
 		return -ENOMEM;
+
 	spin_lock_init(&mbox->lock);
+	mbox->regs = regs;
 
-	ret = devm_request_irq(dev, irq_of_parse_and_map(dev->of_node, 0),
-			       bcm2835_mbox_irq, 0, dev_name(dev), mbox);
-	if (ret) {
-		dev_err(dev, "Failed to register a mailbox IRQ handler: %d\n",
-			ret);
-		return -ENODEV;
-	}
-
-	iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	mbox->regs = devm_ioremap_resource(&pdev->dev, iomem);
-	if (IS_ERR(mbox->regs)) {
-		ret = PTR_ERR(mbox->regs);
-		dev_err(&pdev->dev, "Failed to remap mailbox regs: %d\n", ret);
+	ret = devm_request_irq(dev, irq, bcm2835_mbox_irq,
+			IRQF_NO_SUSPEND, dev_name(dev), mbox);
+	if (ret)
 		return ret;
-	}
 
 	mbox->controller.txdone_poll = true;
 	mbox->controller.txpoll_period = 5;
@@ -178,21 +172,7 @@ static int bcm2835_mbox_probe(struct platform_device *pdev)
 	if (!mbox->controller.chans)
 		return -ENOMEM;
 
-	ret = mbox_controller_register(&mbox->controller);
-	if (ret)
-		return ret;
-
-	platform_set_drvdata(pdev, mbox);
-	dev_info(dev, "mailbox enabled\n");
-
-	return ret;
-}
-
-static int bcm2835_mbox_remove(struct platform_device *pdev)
-{
-	struct bcm2835_mbox *mbox = platform_get_drvdata(pdev);
-	mbox_controller_unregister(&mbox->controller);
-	return 0;
+	return devm_mbox_controller_register(dev, &mbox->controller);
 }
 
 static const struct of_device_id bcm2835_mbox_of_match[] = {
@@ -207,7 +187,6 @@ static struct platform_driver bcm2835_mbox_driver = {
 		.of_match_table = bcm2835_mbox_of_match,
 	},
 	.probe		= bcm2835_mbox_probe,
-	.remove		= bcm2835_mbox_remove,
 };
 module_platform_driver(bcm2835_mbox_driver);
 

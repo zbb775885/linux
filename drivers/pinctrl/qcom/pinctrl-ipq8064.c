@@ -1,21 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
  */
 
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
-#include <linux/pinctrl/pinctrl.h>
 
 #include "pinctrl-msm.h"
 
@@ -170,30 +160,23 @@ static const unsigned int sdc3_clk_pins[] = { 69 };
 static const unsigned int sdc3_cmd_pins[] = { 70 };
 static const unsigned int sdc3_data_pins[] = { 71 };
 
-#define FUNCTION(fname)					\
-	[IPQ_MUX_##fname] = {				\
-		.name = #fname,				\
-		.groups = fname##_groups,		\
-		.ngroups = ARRAY_SIZE(fname##_groups),	\
-	}
-
 #define PINGROUP(id, f1, f2, f3, f4, f5, f6, f7, f8, f9, f10) \
 	{						\
-		.name = "gpio" #id,			\
-		.pins = gpio##id##_pins,		\
-		.npins = ARRAY_SIZE(gpio##id##_pins),	\
+		.grp = PINCTRL_PINGROUP("gpio" #id, 	\
+			gpio##id##_pins, 		\
+			ARRAY_SIZE(gpio##id##_pins)),	\
 		.funcs = (int[]){			\
-			IPQ_MUX_gpio,			\
-			IPQ_MUX_##f1,			\
-			IPQ_MUX_##f2,			\
-			IPQ_MUX_##f3,			\
-			IPQ_MUX_##f4,			\
-			IPQ_MUX_##f5,			\
-			IPQ_MUX_##f6,			\
-			IPQ_MUX_##f7,			\
-			IPQ_MUX_##f8,			\
-			IPQ_MUX_##f9,			\
-			IPQ_MUX_##f10,			\
+			msm_mux_gpio,			\
+			msm_mux_##f1,			\
+			msm_mux_##f2,			\
+			msm_mux_##f3,			\
+			msm_mux_##f4,			\
+			msm_mux_##f5,			\
+			msm_mux_##f6,			\
+			msm_mux_##f7,			\
+			msm_mux_##f8,			\
+			msm_mux_##f9,			\
+			msm_mux_##f10,			\
 		},					\
 		.nfuncs = 11,				\
 		.ctl_reg = 0x1000 + 0x10 * id,		\
@@ -220,9 +203,9 @@ static const unsigned int sdc3_data_pins[] = { 71 };
 
 #define SDC_PINGROUP(pg_name, ctl, pull, drv)		\
 	{						\
-		.name = #pg_name,	                \
-		.pins = pg_name##_pins,                 \
-		.npins = ARRAY_SIZE(pg_name##_pins),    \
+		.grp = PINCTRL_PINGROUP(#pg_name, 	\
+			pg_name##_pins, 		\
+			ARRAY_SIZE(pg_name##_pins)),	\
 		.ctl_reg = ctl,                         \
 		.io_reg = 0,                            \
 		.intr_cfg_reg = 0,                      \
@@ -245,53 +228,53 @@ static const unsigned int sdc3_data_pins[] = { 71 };
 	}
 
 enum ipq8064_functions {
-	IPQ_MUX_gpio,
-	IPQ_MUX_mdio,
-	IPQ_MUX_mi2s,
-	IPQ_MUX_pdm,
-	IPQ_MUX_ssbi,
-	IPQ_MUX_spmi,
-	IPQ_MUX_audio_pcm,
-	IPQ_MUX_gsbi1,
-	IPQ_MUX_gsbi2,
-	IPQ_MUX_gsbi4,
-	IPQ_MUX_gsbi5,
-	IPQ_MUX_gsbi5_spi_cs1,
-	IPQ_MUX_gsbi5_spi_cs2,
-	IPQ_MUX_gsbi5_spi_cs3,
-	IPQ_MUX_gsbi6,
-	IPQ_MUX_gsbi7,
-	IPQ_MUX_nss_spi,
-	IPQ_MUX_sdc1,
-	IPQ_MUX_spdif,
-	IPQ_MUX_nand,
-	IPQ_MUX_tsif1,
-	IPQ_MUX_tsif2,
-	IPQ_MUX_usb_fs_n,
-	IPQ_MUX_usb_fs,
-	IPQ_MUX_usb2_hsic,
-	IPQ_MUX_rgmii2,
-	IPQ_MUX_sata,
-	IPQ_MUX_pcie1_rst,
-	IPQ_MUX_pcie1_prsnt,
-	IPQ_MUX_pcie1_pwrflt,
-	IPQ_MUX_pcie1_pwren_n,
-	IPQ_MUX_pcie1_pwren,
-	IPQ_MUX_pcie1_clk_req,
-	IPQ_MUX_pcie2_rst,
-	IPQ_MUX_pcie2_prsnt,
-	IPQ_MUX_pcie2_pwrflt,
-	IPQ_MUX_pcie2_pwren_n,
-	IPQ_MUX_pcie2_pwren,
-	IPQ_MUX_pcie2_clk_req,
-	IPQ_MUX_pcie3_rst,
-	IPQ_MUX_pcie3_prsnt,
-	IPQ_MUX_pcie3_pwrflt,
-	IPQ_MUX_pcie3_pwren_n,
-	IPQ_MUX_pcie3_pwren,
-	IPQ_MUX_pcie3_clk_req,
-	IPQ_MUX_ps_hold,
-	IPQ_MUX_NA,
+	msm_mux_gpio,
+	msm_mux_mdio,
+	msm_mux_mi2s,
+	msm_mux_pdm,
+	msm_mux_ssbi,
+	msm_mux_spmi,
+	msm_mux_audio_pcm,
+	msm_mux_gsbi1,
+	msm_mux_gsbi2,
+	msm_mux_gsbi4,
+	msm_mux_gsbi5,
+	msm_mux_gsbi5_spi_cs1,
+	msm_mux_gsbi5_spi_cs2,
+	msm_mux_gsbi5_spi_cs3,
+	msm_mux_gsbi6,
+	msm_mux_gsbi7,
+	msm_mux_nss_spi,
+	msm_mux_sdc1,
+	msm_mux_spdif,
+	msm_mux_nand,
+	msm_mux_tsif1,
+	msm_mux_tsif2,
+	msm_mux_usb_fs_n,
+	msm_mux_usb_fs,
+	msm_mux_usb2_hsic,
+	msm_mux_rgmii2,
+	msm_mux_sata,
+	msm_mux_pcie1_rst,
+	msm_mux_pcie1_prsnt,
+	msm_mux_pcie1_pwrflt,
+	msm_mux_pcie1_pwren_n,
+	msm_mux_pcie1_pwren,
+	msm_mux_pcie1_clk_req,
+	msm_mux_pcie2_rst,
+	msm_mux_pcie2_prsnt,
+	msm_mux_pcie2_pwrflt,
+	msm_mux_pcie2_pwren_n,
+	msm_mux_pcie2_pwren,
+	msm_mux_pcie2_clk_req,
+	msm_mux_pcie3_rst,
+	msm_mux_pcie3_prsnt,
+	msm_mux_pcie3_pwrflt,
+	msm_mux_pcie3_pwren_n,
+	msm_mux_pcie3_pwren,
+	msm_mux_pcie3_clk_req,
+	msm_mux_ps_hold,
+	msm_mux_NA,
 };
 
 static const char * const gpio_groups[] = {
@@ -308,7 +291,7 @@ static const char * const gpio_groups[] = {
 };
 
 static const char * const mdio_groups[] = {
-	"gpio0", "gpio1", "gpio10", "gpio11",
+	"gpio0", "gpio1", "gpio2", "gpio10", "gpio11", "gpio66",
 };
 
 static const char * const mi2s_groups[] = {
@@ -412,8 +395,8 @@ static const char * const usb2_hsic_groups[] = {
 };
 
 static const char * const rgmii2_groups[] = {
-	"gpio27", "gpio28", "gpio29", "gpio30", "gpio31", "gpio32",
-	"gpio51", "gpio52", "gpio59", "gpio60", "gpio61", "gpio62",
+	"gpio2", "gpio27", "gpio28", "gpio29", "gpio30", "gpio31", "gpio32",
+	"gpio51", "gpio52", "gpio59", "gpio60", "gpio61", "gpio62", "gpio66",
 };
 
 static const char * const sata_groups[] = {
@@ -496,59 +479,59 @@ static const char * const ps_hold_groups[] = {
 	"gpio26",
 };
 
-static const struct msm_function ipq8064_functions[] = {
-	FUNCTION(gpio),
-	FUNCTION(mdio),
-	FUNCTION(ssbi),
-	FUNCTION(spmi),
-	FUNCTION(mi2s),
-	FUNCTION(pdm),
-	FUNCTION(audio_pcm),
-	FUNCTION(gsbi1),
-	FUNCTION(gsbi2),
-	FUNCTION(gsbi4),
-	FUNCTION(gsbi5),
-	FUNCTION(gsbi5_spi_cs1),
-	FUNCTION(gsbi5_spi_cs2),
-	FUNCTION(gsbi5_spi_cs3),
-	FUNCTION(gsbi6),
-	FUNCTION(gsbi7),
-	FUNCTION(nss_spi),
-	FUNCTION(sdc1),
-	FUNCTION(spdif),
-	FUNCTION(nand),
-	FUNCTION(tsif1),
-	FUNCTION(tsif2),
-	FUNCTION(usb_fs_n),
-	FUNCTION(usb_fs),
-	FUNCTION(usb2_hsic),
-	FUNCTION(rgmii2),
-	FUNCTION(sata),
-	FUNCTION(pcie1_rst),
-	FUNCTION(pcie1_prsnt),
-	FUNCTION(pcie1_pwren_n),
-	FUNCTION(pcie1_pwren),
-	FUNCTION(pcie1_pwrflt),
-	FUNCTION(pcie1_clk_req),
-	FUNCTION(pcie2_rst),
-	FUNCTION(pcie2_prsnt),
-	FUNCTION(pcie2_pwren_n),
-	FUNCTION(pcie2_pwren),
-	FUNCTION(pcie2_pwrflt),
-	FUNCTION(pcie2_clk_req),
-	FUNCTION(pcie3_rst),
-	FUNCTION(pcie3_prsnt),
-	FUNCTION(pcie3_pwren_n),
-	FUNCTION(pcie3_pwren),
-	FUNCTION(pcie3_pwrflt),
-	FUNCTION(pcie3_clk_req),
-	FUNCTION(ps_hold),
+static const struct pinfunction ipq8064_functions[] = {
+	MSM_GPIO_PIN_FUNCTION(gpio),
+	MSM_PIN_FUNCTION(mdio),
+	MSM_PIN_FUNCTION(ssbi),
+	MSM_PIN_FUNCTION(spmi),
+	MSM_PIN_FUNCTION(mi2s),
+	MSM_PIN_FUNCTION(pdm),
+	MSM_PIN_FUNCTION(audio_pcm),
+	MSM_PIN_FUNCTION(gsbi1),
+	MSM_PIN_FUNCTION(gsbi2),
+	MSM_PIN_FUNCTION(gsbi4),
+	MSM_PIN_FUNCTION(gsbi5),
+	MSM_PIN_FUNCTION(gsbi5_spi_cs1),
+	MSM_PIN_FUNCTION(gsbi5_spi_cs2),
+	MSM_PIN_FUNCTION(gsbi5_spi_cs3),
+	MSM_PIN_FUNCTION(gsbi6),
+	MSM_PIN_FUNCTION(gsbi7),
+	MSM_PIN_FUNCTION(nss_spi),
+	MSM_PIN_FUNCTION(sdc1),
+	MSM_PIN_FUNCTION(spdif),
+	MSM_PIN_FUNCTION(nand),
+	MSM_PIN_FUNCTION(tsif1),
+	MSM_PIN_FUNCTION(tsif2),
+	MSM_PIN_FUNCTION(usb_fs_n),
+	MSM_PIN_FUNCTION(usb_fs),
+	MSM_PIN_FUNCTION(usb2_hsic),
+	MSM_PIN_FUNCTION(rgmii2),
+	MSM_PIN_FUNCTION(sata),
+	MSM_GPIO_PIN_FUNCTION(pcie1_rst),
+	MSM_PIN_FUNCTION(pcie1_prsnt),
+	MSM_PIN_FUNCTION(pcie1_pwren_n),
+	MSM_PIN_FUNCTION(pcie1_pwren),
+	MSM_PIN_FUNCTION(pcie1_pwrflt),
+	MSM_PIN_FUNCTION(pcie1_clk_req),
+	MSM_GPIO_PIN_FUNCTION(pcie2_rst),
+	MSM_PIN_FUNCTION(pcie2_prsnt),
+	MSM_PIN_FUNCTION(pcie2_pwren_n),
+	MSM_PIN_FUNCTION(pcie2_pwren),
+	MSM_PIN_FUNCTION(pcie2_pwrflt),
+	MSM_PIN_FUNCTION(pcie2_clk_req),
+	MSM_GPIO_PIN_FUNCTION(pcie3_rst),
+	MSM_PIN_FUNCTION(pcie3_prsnt),
+	MSM_PIN_FUNCTION(pcie3_pwren_n),
+	MSM_PIN_FUNCTION(pcie3_pwren),
+	MSM_PIN_FUNCTION(pcie3_pwrflt),
+	MSM_PIN_FUNCTION(pcie3_clk_req),
+	MSM_PIN_FUNCTION(ps_hold),
 };
 
 static const struct msm_pingroup ipq8064_groups[] = {
 	PINGROUP(0, mdio, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(1, mdio, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(2, gsbi5_spi_cs3, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(2, gsbi5_spi_cs3, rgmii2, mdio, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(3, pcie1_rst, pcie1_prsnt, pdm, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(4, pcie1_pwren_n, pcie1_pwren, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(5, pcie1_clk_req, pcie1_pwrflt, NA, NA, NA, NA, NA, NA, NA, NA),
@@ -612,7 +595,7 @@ static const struct msm_pingroup ipq8064_groups[] = {
 	PINGROUP(63, pcie3_rst, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(64, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(65, pcie3_clk_req, NA, NA, NA, NA, NA, NA, NA, NA, NA),
-	PINGROUP(66, NA, NA, NA, NA, NA, NA, NA, NA, NA, NA),
+	PINGROUP(66, rgmii2, mdio, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(67, usb2_hsic, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 	PINGROUP(68, usb2_hsic, NA, NA, NA, NA, NA, NA, NA, NA, NA),
 	SDC_PINGROUP(sdc3_clk, 0x204a, 14, 6),
@@ -641,6 +624,7 @@ static const struct of_device_id ipq8064_pinctrl_of_match[] = {
 	{ .compatible = "qcom,ipq8064-pinctrl", },
 	{ },
 };
+MODULE_DEVICE_TABLE(of, ipq8064_pinctrl_of_match);
 
 static struct platform_driver ipq8064_pinctrl_driver = {
 	.driver = {
@@ -648,7 +632,6 @@ static struct platform_driver ipq8064_pinctrl_driver = {
 		.of_match_table = ipq8064_pinctrl_of_match,
 	},
 	.probe = ipq8064_pinctrl_probe,
-	.remove = msm_pinctrl_remove,
 };
 
 static int __init ipq8064_pinctrl_init(void)
@@ -666,4 +649,3 @@ module_exit(ipq8064_pinctrl_exit);
 MODULE_AUTHOR("Andy Gross <agross@codeaurora.org>");
 MODULE_DESCRIPTION("Qualcomm IPQ8064 pinctrl driver");
 MODULE_LICENSE("GPL v2");
-MODULE_DEVICE_TABLE(of, ipq8064_pinctrl_of_match);
